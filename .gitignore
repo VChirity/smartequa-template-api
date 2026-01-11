@@ -1,5 +1,9 @@
 venv/
+Lib/
+Scripts/
+Include/
 __pycache__/
 .DS_Store
 *.pyc
 .env
+pyvenv.cfg

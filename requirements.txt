@@ -3,3 +3,6 @@ docxtpl
 requests
 faker
 num2words
+flask==3.0.0
+flask-cors==4.0.0
+python-docx==1.1.0
