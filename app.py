@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from docxtpl import DocxTemplate, RichText
 from faker import Faker
 import requests
@@ -20,6 +21,50 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+# JavaScript para formatação em tempo real
+components.html("""
+<script>
+(function() {
+    function formatarData() {
+        const inputs = parent.document.querySelectorAll('input[aria-label*="Data de Nascimento"]');
+        inputs.forEach(input => {
+            if (!input.hasAttribute('data-date-formatted')) {
+                input.setAttribute('data-date-formatted', 'true');
+                input.addEventListener('input', function(e) {
+                    let valor = e.target.value.replace(/[^0-9]/g, '');
+                    let formatado = '';
+                    
+                    if (valor.length >= 1) {
+                        formatado = valor.substring(0, 2);
+                    }
+                    if (valor.length >= 3) {
+                        formatado += '/' + valor.substring(2, 4);
+                    }
+                    if (valor.length >= 5) {
+                        formatado += '/' + valor.substring(4, 8);
+                    }
+                    
+                    const cursorPos = e.target.selectionStart;
+                    const oldLength = e.target.value.length;
+                    
+                    if (formatado !== e.target.value) {
+                        e.target.value = formatado;
+                        // Ajusta cursor
+                        const newLength = formatado.length;
+                        const diff = newLength - oldLength;
+                        e.target.setSelectionRange(cursorPos + diff, cursorPos + diff);
+                    }
+                });
+            }
+        });
+    }
+    
+    // Executa repetidamente para pegar inputs renderizados dinamicamente
+    setInterval(formatarData, 300);
+})();
+</script>
+""", height=0)
 
 def limpar_cep(cep):
     return re.sub(r'\D', '', str(cep))
@@ -58,6 +103,26 @@ def converter_desconto():
             st.session_state['desconto_extenso'] = extenso
         except:
             pass
+
+def formatar_data(key):
+    """Formata data automaticamente com barras (DD/MM/AAAA)"""
+    data = st.session_state.get(key, '')
+    # Remove tudo que não é número
+    apenas_numeros = re.sub(r'\D', '', data)
+    
+    # Formata com barras
+    if len(apenas_numeros) <= 2:
+        formatado = apenas_numeros
+    elif len(apenas_numeros) <= 4:
+        formatado = f"{apenas_numeros[:2]}/{apenas_numeros[2:]}"
+    elif len(apenas_numeros) <= 8:
+        formatado = f"{apenas_numeros[:2]}/{apenas_numeros[2:4]}/{apenas_numeros[4:8]}"
+    else:
+        formatado = f"{apenas_numeros[:2]}/{apenas_numeros[2:4]}/{apenas_numeros[4:8]}"
+    
+    # Atualiza apenas se mudou
+    if formatado != data:
+        st.session_state[key] = formatado
 
 TEMPLATES_DISPONIVEIS = {
     "📄 Contrato Padrão 2025": "template_contrato2025_2.docx",
@@ -153,7 +218,7 @@ c4.text_input("Nome Completo", key="nome_resp1")
 c5.text_input("CPF", key="cpf_resp1")
 c6, c7 = st.columns([2, 1])
 c6.text_input("Naturalidade", key="naturalidade_resp1", value="Rio de Janeiro", placeholder="Ex: São Paulo/SP")
-c7.text_input("Data de Nascimento", key="nasc_resp1", placeholder="DD/MM/AAAA", help="Formato: 01/01/1980")
+c7.text_input("Data de Nascimento", key="nasc_resp1", placeholder="DD/MM/AAAA", help="Formato: 01/01/1980", max_chars=10, on_change=formatar_data, args=('nasc_resp1',))
 
 st.markdown("---")
 st.markdown("### 👥 Responsável 2 (Opcional)")
@@ -174,7 +239,7 @@ e3.text_input("Ano Letivo", key="ano_letivo", value="2025")
 st.text_input("Data Extenso", key="data_extenso")
 e4, e5, e6 = st.columns([2, 1, 1])
 e4.text_input("Naturalidade", key="naturalidade_aluno", value="Rio de Janeiro", placeholder="Ex: Rio de Janeiro/RJ")
-e5.text_input("Data de Nascimento", key="nasc_aluno", placeholder="DD/MM/AAAA", help="Formato: 15/03/2010")
+e5.text_input("Data de Nascimento", key="nasc_aluno", placeholder="DD/MM/AAAA", help="Formato: 15/03/2010", max_chars=10, on_change=formatar_data, args=('nasc_aluno',))
 e6.text_input("CPF do Aluno", key="cpf_aluno", placeholder="000.000.000-00")
 
 st.markdown("---")
