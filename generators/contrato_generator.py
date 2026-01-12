@@ -12,13 +12,8 @@ def gerar_contrato_word(dados):
     Returns:
         BytesIO: Arquivo Word em memória
     """
-    # Determinar qual template usar
-    tem_desconto = dados.get('tem_desconto', False)
-    
-    if tem_desconto:
-        template_path = os.path.join('templates_contratos', 'template_contratoDESCONTO2025_2.docx')
-    else:
-        template_path = os.path.join('templates_contratos', 'template_contrato2025_2.docx')
+    # Usar o novo template único CONTRATO_EQUAÇÃO_2026.docx
+    template_path = os.path.join('templates_contratos', 'CONTRATO_EQUAÇÃO_2026.docx')
     
     if not os.path.exists(template_path):
         raise FileNotFoundError(f'Template não encontrado: {template_path}')
@@ -26,7 +21,7 @@ def gerar_contrato_word(dados):
     # Carregar template
     doc = DocxTemplate(template_path)
     
-    # Preparar contexto com os dados (mesmas tags do Streamlit)
+    # Preparar contexto com os dados
     contexto = {
         # Responsável 1
         'responsavel1': dados.get('nome_responsavel1', ''),
@@ -47,17 +42,44 @@ def gerar_contrato_word(dados):
         # Aluno
         'nome_aluno': dados.get('nome_aluno', ''),
         'ano': dados.get('ano_escolar', ''),
-        'ano_letivo': dados.get('ano_letivo', '2025'),
+        'ano_letivo': dados.get('ano_letivo', '2026'),
         'data_extenso': dados.get('data_extenso', ''),
         'naturalidade_aluno': dados.get('naturalidade_aluno', ''),
         'nasc_aluno': dados.get('nasc_aluno', ''),
         'cpf_aluno': dados.get('cpf_aluno', ''),
+        
+        # Desconto (sempre incluir, calculado automaticamente)
+        'desconto': dados.get('desconto', ''),
+        'desconto_extenso': dados.get('desconto_extenso', ''),
+        
+        # Mensalidades mensais (mens_jan a mens_dez)
+        'mens_jan': dados.get('mens_jan', ''),
+        'mens_fev': dados.get('mens_fev', ''),
+        'mens_mar': dados.get('mens_mar', ''),
+        'mens_abr': dados.get('mens_abr', ''),
+        'mens_mai': dados.get('mens_mai', ''),
+        'mens_jun': dados.get('mens_jun', ''),
+        'mens_jul': dados.get('mens_jul', ''),
+        'mens_ago': dados.get('mens_ago', ''),
+        'mens_set': dados.get('mens_set', ''),
+        'mens_out': dados.get('mens_out', ''),
+        'mens_nov': dados.get('mens_nov', ''),
+        'mens_dez': dados.get('mens_dez', ''),
+        
+        # Valores por extenso (extenso_jan a extenso_dez)
+        'extenso_jan': dados.get('extenso_jan', ''),
+        'extenso_fev': dados.get('extenso_fev', ''),
+        'extenso_mar': dados.get('extenso_mar', ''),
+        'extenso_abr': dados.get('extenso_abr', ''),
+        'extenso_mai': dados.get('extenso_mai', ''),
+        'extenso_jun': dados.get('extenso_jun', ''),
+        'extenso_jul': dados.get('extenso_jul', ''),
+        'extenso_ago': dados.get('extenso_ago', ''),
+        'extenso_set': dados.get('extenso_set', ''),
+        'extenso_out': dados.get('extenso_out', ''),
+        'extenso_nov': dados.get('extenso_nov', ''),
+        'extenso_dez': dados.get('extenso_dez', ''),
     }
-    
-    # Se tiver desconto, adicionar campos específicos
-    if tem_desconto:
-        contexto['desconto'] = dados.get('desconto', '')
-        contexto['desconto_extenso'] = dados.get('desconto_extenso', '')
     
     # Renderizar template
     doc.render(contexto)
