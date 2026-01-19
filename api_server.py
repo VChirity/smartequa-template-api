@@ -186,10 +186,6 @@ def transcrever_redacao():
         print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini 1.5 Flash 001
-        model = genai.GenerativeModel('models/gemini-1.5-flash-001')
-        print('✅ Modelo Gemini 1.5 Flash 001 configurado para transcrição')
-        
         # Decodificar imagem Base64
         imagem_base64 = dados['imagem']
         if ',' in imagem_base64:
@@ -210,10 +206,32 @@ Apenas transcreva fielmente o que está escrito.
 Se houver palavras ilegíveis, marque com [ilegível].
 Mantenha a estrutura de parágrafos."""
         
-        # Gerar transcrição com formato correto
-        import PIL.Image
-        response = model.generate_content([prompt_ocr, imagem])
-        texto_transcrito = response.text
+        # Sistema de fallback: tenta múltiplos modelos
+        modelos = [
+            'models/gemini-2.5-flash',      # Melhor: mais recente e rápido
+            'models/gemini-flash-latest',   # Fallback 1: sempre atualizado
+            'models/gemini-2.5-pro'         # Fallback 2: mais poderoso
+        ]
+        
+        texto_transcrito = None
+        ultimo_erro = None
+        
+        for modelo_nome in modelos:
+            try:
+                print(f'🔄 Tentando modelo: {modelo_nome}')
+                model = genai.GenerativeModel(modelo_nome)
+                response = model.generate_content([prompt_ocr, imagem])
+                texto_transcrito = response.text
+                print(f'✅ Sucesso com modelo: {modelo_nome}')
+                break  # Sucesso! Sair do loop
+            except Exception as e:
+                ultimo_erro = str(e)
+                print(f'❌ Falha com {modelo_nome}: {ultimo_erro}')
+                continue  # Tentar próximo modelo
+        
+        # Se nenhum modelo funcionou, retornar erro
+        if texto_transcrito is None:
+            raise Exception(f'Nenhum modelo funcionou. Último erro: {ultimo_erro}')
         
         return jsonify({
             'sucesso': True,
