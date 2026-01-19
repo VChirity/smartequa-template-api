@@ -154,7 +154,7 @@ def transcrever_redacao():
             return jsonify({'error': 'Imagem não fornecida'}), 400
         
         # Configurar API do Gemini
-        api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBYguTmgGSxnMogIruKZjKPTga0oGtMBwY')
+        api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBomqSUgc3m7HCZu_dQS0nUy2cPSDT1q7I')
         print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
@@ -214,7 +214,7 @@ def corrigir_redacao():
         texto = dados['texto']
         
         # Configurar API do Gemini
-        api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBYguTmgGSxnMogIruKZjKPTga0oGtMBwY')
+        api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBomqSUgc3m7HCZu_dQS0nUy2cPSDT1q7I')
         print(f'🔑 Corrigir - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
