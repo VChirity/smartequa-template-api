@@ -268,10 +268,6 @@ def corrigir_redacao():
         print(f'🔑 Corrigir - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini 1.5 Flash (mais estável)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        print('✅ Modelo Gemini 1.5 Flash configurado para correção')
-        
         # Montar prompt completo
         prompt_completo = f"""{PROMPT_REGRAS}
 
@@ -296,9 +292,32 @@ Retorne APENAS um JSON válido (sem markdown, sem ```json) com a seguinte estrut
   "sugestoes": ["...", "..."]
 }}"""
         
-        # Gerar correção
-        response = model.generate_content(prompt_completo)
-        resposta_texto = response.text.strip()
+        # Sistema de fallback: tenta múltiplos modelos
+        modelos = [
+            'models/gemini-2.5-flash',      # Melhor: mais recente e rápido
+            'models/gemini-flash-latest',   # Fallback 1: sempre atualizado
+            'models/gemini-2.5-pro'         # Fallback 2: mais poderoso
+        ]
+        
+        resposta_texto = None
+        ultimo_erro = None
+        
+        for modelo_nome in modelos:
+            try:
+                print(f'🔄 Tentando modelo: {modelo_nome}')
+                model = genai.GenerativeModel(modelo_nome)
+                response = model.generate_content(prompt_completo)
+                resposta_texto = response.text.strip()
+                print(f'✅ Sucesso com modelo: {modelo_nome}')
+                break  # Sucesso! Sair do loop
+            except Exception as e:
+                ultimo_erro = str(e)
+                print(f'❌ Falha com {modelo_nome}: {ultimo_erro}')
+                continue  # Tentar próximo modelo
+        
+        # Se nenhum modelo funcionou, retornar erro
+        if resposta_texto is None:
+            raise Exception(f'Nenhum modelo funcionou. Último erro: {ultimo_erro}')
         
         # Limpar markdown se houver
         if resposta_texto.startswith('```'):
