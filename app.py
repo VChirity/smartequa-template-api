@@ -98,8 +98,24 @@ def converter_desconto():
     desconto = st.session_state.get('desconto', '')
     if desconto and desconto.strip():
         try:
-            valor = float(desconto)
-            extenso = num2words(valor, lang='pt_BR')
+            valor = float(desconto.replace(',', '.'))
+            
+            # Separar parte inteira e decimal
+            partes = str(valor).split('.')
+            parte_inteira = int(partes[0])
+            
+            # Converter parte inteira
+            extenso_inteira = num2words(parte_inteira, lang='pt_BR')
+            
+            # Se tem parte decimal
+            if len(partes) > 1 and partes[1] != '0':
+                parte_decimal = partes[1].ljust(2, '0')[:2]  # Pegar 2 dígitos
+                decimal_num = int(parte_decimal)
+                extenso_decimal = num2words(decimal_num, lang='pt_BR')
+                extenso = f"{extenso_inteira} vírgula {extenso_decimal} por cento"
+            else:
+                extenso = f"{extenso_inteira} por cento"
+            
             st.session_state['desconto_extenso'] = extenso
         except:
             pass

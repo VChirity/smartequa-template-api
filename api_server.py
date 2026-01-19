@@ -11,12 +11,36 @@ import google.generativeai as genai
 from regras_correcao import PROMPT_REGRAS
 from PIL import Image
 from io import BytesIO
+from num2words import num2words
 
 # Carregar variáveis de ambiente
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Permitir requisições do Flutter
+
+def converter_desconto_extenso(desconto_str):
+    """Converte desconto numérico para extenso com decimais corretos"""
+    try:
+        valor = float(desconto_str.replace(',', '.'))
+        
+        # Separar parte inteira e decimal
+        partes = str(valor).split('.')
+        parte_inteira = int(partes[0])
+        
+        # Converter parte inteira
+        extenso_inteira = num2words(parte_inteira, lang='pt_BR')
+        
+        # Se tem parte decimal
+        if len(partes) > 1 and partes[1] != '0':
+            parte_decimal = partes[1].ljust(2, '0')[:2]  # Pegar 2 dígitos
+            decimal_num = int(parte_decimal)
+            extenso_decimal = num2words(decimal_num, lang='pt_BR')
+            return f"{extenso_inteira} vírgula {extenso_decimal} por cento"
+        else:
+            return f"{extenso_inteira} por cento"
+    except:
+        return desconto_str
 
 @app.route('/')
 def home():
@@ -79,6 +103,10 @@ def gerar_contrato():
         
         if not dados:
             return jsonify({'error': 'Nenhum dado recebido'}), 400
+        
+        # Converter desconto para extenso se houver
+        if 'desconto' in dados and dados['desconto']:
+            dados['desconto_extenso'] = converter_desconto_extenso(dados['desconto'])
         
         # Gerar documento Word
         arquivo = gerar_contrato_word(dados)
