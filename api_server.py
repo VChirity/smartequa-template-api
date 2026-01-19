@@ -155,10 +155,12 @@ def transcrever_redacao():
         
         # Configurar API do Gemini
         api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBYguTmgGSxnMogIruKZjKPTga0oGtMBwY')
+        print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini 2.5 Pro
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Usar modelo Gemini 1.5 Flash (mais estável)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        print('✅ Modelo Gemini 1.5 Flash configurado para transcrição')
         
         # Decodificar imagem Base64
         imagem_base64 = dados['imagem']
@@ -212,10 +214,12 @@ def corrigir_redacao():
         
         # Configurar API do Gemini
         api_key = os.getenv('GEMINI_API_KEY', 'AIzaSyBYguTmgGSxnMogIruKZjKPTga0oGtMBwY')
+        print(f'🔑 Corrigir - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini 2.5 Pro
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Usar modelo Gemini 1.5 Flash (mais estável)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        print('✅ Modelo Gemini 1.5 Flash configurado para correção')
         
         # Montar prompt completo
         prompt_completo = f"""{PROMPT_REGRAS}
