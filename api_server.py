@@ -204,6 +204,9 @@ NÃO corrija erros ortográficos ou gramaticais.
 NÃO adicione ou remova palavras.
 NÃO interprete ou melhore o texto.
 Apenas transcreva fielmente o que está escrito.
+
+IMPORTANTE: Se houver um hífen (-) no final de uma linha para quebrar uma palavra, REMOVA o hífen e junte a palavra na linha seguinte.
+Exemplo: Se está escrito "desenvolvi-\nmento", transcreva como "desenvolvimento".
         
 Se houver palavras ilegíveis, marque com [ilegível].
 Mantenha a estrutura de parágrafos."""
@@ -281,15 +284,18 @@ def corrigir_redacao():
 Analise a redação acima considerando o tema proposto e os critérios estabelecidos.
 Retorne APENAS um JSON válido (sem markdown, sem ```json) com a seguinte estrutura:
 {{
-  "nota_final": <número de 0 a 1000>,
-  "competencia_1": {{"nota": <0-200>, "comentario": "..."}},
-  "competencia_2": {{"nota": <0-200>, "comentario": "..."}},
-  "competencia_3": {{"nota": <0-200>, "comentario": "..."}},
-  "competencia_4": {{"nota": <0-200>, "comentario": "..."}},
-  "competencia_5": {{"nota": <0-200>, "comentario": "..."}},
-  "pontos_fortes": ["...", "..."],
-  "pontos_fracos": ["...", "..."],
-  "sugestoes": ["...", "..."]
+  "tema_compreendido": "Sim/Não (e se houve tangenciamento)",
+  "nota_estimada": "Entre X.X e Y.Y",
+  "detalhes_competencias": {{
+    "comp1_escrita": "Nota estimada (0-2.0) e comentários sobre erros gramaticais/crase/pontuação.",
+    "comp2_tema_estrutura": "Nota estimada (0-2.0) e comentários sobre a estrutura do texto.",
+    "comp3_argumentacao": "Nota estimada (0-2.0) e comentários sobre a defesa do ponto de vista.",
+    "comp4_coesao": "Nota estimada (0-2.0) e comentários sobre uso de conectivos e repetições.",
+    "comp5_proposta": "Nota estimada (0-2.0) e verificação dos 5 elementos."
+  }},
+  "pontos_fortes": ["Lista de acertos"],
+  "pontos_a_melhorar": ["Lista de erros específicos"],
+  "conselho_final": "Mensagem motivadora focada na aprovação (CEFET/IFRJ/PEDRO II). Lembre-se: este é um aluno de 9º ano, não um vestibulando."
 }}"""
         
         # Sistema de fallback: tenta múltiplos modelos
