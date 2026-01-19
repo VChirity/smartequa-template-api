@@ -186,9 +186,9 @@ def transcrever_redacao():
         print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini 1.5 Flash
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        print('✅ Modelo Gemini 1.5 Flash configurado para transcrição')
+        # Usar modelo Gemini 1.5 Flash 001
+        model = genai.GenerativeModel('models/gemini-1.5-flash-001')
+        print('✅ Modelo Gemini 1.5 Flash 001 configurado para transcrição')
         
         # Decodificar imagem Base64
         imagem_base64 = dados['imagem']
