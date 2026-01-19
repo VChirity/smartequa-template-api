@@ -158,9 +158,9 @@ def transcrever_redacao():
         print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
-        # Usar modelo Gemini Pro (mais compatível)
-        model = genai.GenerativeModel('gemini-pro-vision')
-        print('✅ Modelo Gemini Pro Vision configurado para transcrição')
+        # Usar modelo Gemini 1.5 Flash
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        print('✅ Modelo Gemini 1.5 Flash configurado para transcrição')
         
         # Decodificar imagem Base64
         imagem_base64 = dados['imagem']
@@ -182,7 +182,8 @@ Apenas transcreva fielmente o que está escrito.
 Se houver palavras ilegíveis, marque com [ilegível].
 Mantenha a estrutura de parágrafos."""
         
-        # Gerar transcrição
+        # Gerar transcrição com formato correto
+        import PIL.Image
         response = model.generate_content([prompt_ocr, imagem])
         texto_transcrito = response.text
         
