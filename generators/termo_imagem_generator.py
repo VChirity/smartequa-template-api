@@ -32,10 +32,10 @@ def gerar_termo_imagem_word(dados):
         'responsavel1': dados.get('nome_responsavel', ''),
         'cpf_responsavel': dados.get('cpf_responsavel', ''),
         'endereco_completo': dados.get('endereco', ''),
+        'nasc_resp1': dados.get('nasc_resp1', ''),
         
         # Aluno
         'nome_aluno': dados.get('nome_aluno', ''),
-        'naturalidade_aluno': dados.get('naturalidade_aluno', ''),
         'nasc_aluno': dados.get('nasc_aluno', ''),
         'cpf_aluno': dados.get('cpf_aluno', ''),
         
