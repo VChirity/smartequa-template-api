@@ -19,6 +19,10 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # Permitir requisições do Flutter
 
+# Rotas PIX Cantina (Mercado Pago) - sem alterar nada dos templates
+from pix_cantina import register_pix_routes
+register_pix_routes(app)
+
 def converter_desconto_extenso(desconto_str):
     """Converte desconto numérico para extenso com decimais corretos"""
     try:
@@ -52,7 +56,10 @@ def home():
             '/api/gerar-contrato',
             '/api/gerar-termo-imagem',
             '/api/transcrever',
-            '/api/corrigir'
+            '/api/corrigir',
+            '/api/pix/check',
+            '/api/pix/create',
+            '/api/pix/status/<txid>'
         ]
     })
 
