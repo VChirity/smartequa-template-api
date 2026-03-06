@@ -23,6 +23,10 @@ CORS(app)  # Permitir requisições do Flutter
 from pix_cantina import register_pix_routes
 register_pix_routes(app)
 
+# Rotas Firebase Admin (gerenciamento de usuários: deletar, alterar senha, etc.)
+from firebase_admin_routes import register_firebase_admin_routes
+register_firebase_admin_routes(app)
+
 def converter_desconto_extenso(desconto_str):
     """Converte desconto numérico para extenso com decimais corretos"""
     try:
@@ -59,7 +63,11 @@ def home():
             '/api/corrigir',
             '/api/pix/check',
             '/api/pix/create',
-            '/api/pix/status/<txid>'
+            '/api/pix/status/<txid>',
+            '/api/admin/check',
+            '/api/admin/delete-user',
+            '/api/admin/update-password',
+            '/api/admin/update-user'
         ]
     })
 
