@@ -64,10 +64,12 @@ def home():
             '/api/pix/check',
             '/api/pix/create',
             '/api/pix/status/<txid>',
+            '/api/pix/confirm-debt',
+            '/api/pix/settle-debt-balance',
             '/api/admin/check',
             '/api/admin/delete-user',
             '/api/admin/update-password',
-            '/api/admin/update-user'
+            '/api/admin/update-user',
         ]
     })
 

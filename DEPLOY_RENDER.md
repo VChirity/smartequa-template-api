@@ -1,133 +1,31 @@
-# 🚀 Deploy do Template App no Render
+# Deploy no Render (API da cantina + templates)
 
-## Pré-requisitos
-- Conta no GitHub
-- Conta no Render (https://render.com) - grátis
+O app Flutter chama `https://smartequa-template-api.onrender.com`. Depois de qualquer alteração em `api_server.py` ou `pix_cantina.py`, o serviço no Render precisa ser atualizado.
 
-## Passo 1: Criar Repositório no GitHub
+## Opção A — Blueprint (recomendado)
 
-1. Criar novo repositório no GitHub (ex: `smartequa-template-api`)
-2. **NÃO** incluir o `venv/` (já está no .gitignore)
+1. No [Render Dashboard](https://dashboard.render.com), **New** → **Blueprint**.
+2. Conecte o repositório GitHub/GitLab do **SmartEqua**.
+3. O arquivo `render.yaml` na raiz do repo define o serviço com **Root Directory** = `Templates app`.
+4. Ao criar o blueprint, defina os **secrets** (não ficam no Git):
+   - **MERCADO_PAGO_ACCESS_TOKEN** — já deve existir (PIX).
+   - **FIREBASE_SERVICE_ACCOUNT_JSON** — JSON completo da conta de serviço Firebase (uma linha). Obtenha em: Firebase Console → Configurações do projeto → Contas de serviço → Gerar nova chave privada. A conta precisa de acesso ao **Realtime Database** do projeto `equa-sec-apk`.
+   - **GEMINI_API_KEY** — se usar transcrever/corrigir.
 
-## Passo 2: Fazer Push do Código
+## Opção B — Serviço Web já existente
 
-No terminal, dentro da pasta `Templates app`:
+1. **Settings** do serviço `smartequa-template-api` (ou o nome que você usa).
+2. **Root Directory** = `Templates app`.
+3. **Build Command** = `pip install -r requirements.txt`
+4. **Start Command** = `gunicorn api_server:app --bind 0.0.0.0:$PORT --workers 2`
+5. Em **Environment**, adicione **FIREBASE_SERVICE_ACCOUNT_JSON** (secret) como no passo 4 da Opção A.
+6. **Manual Deploy** → **Deploy latest commit**.
 
-```bash
-git init
-git add .
-git commit -m "Initial commit - Template App API"
-git remote add origin https://github.com/SEU_USUARIO/smartequa-template-api.git
-git push -u origin main
-```
+## Conferir se a quitação automática funciona
 
-## Passo 3: Deploy no Render
+Depois do deploy, com o app logado como aluno com dívida:
 
-1. Acesse https://render.com e faça login
-2. Clique em **"New +"** → **"Web Service"**
-3. Conecte seu repositório GitHub
-4. Configure:
-   - **Name:** `smartequa-template-api` (ou outro nome)
-   - **Region:** Escolha a mais próxima (ex: Oregon)
-   - **Branch:** `main`
-   - **Root Directory:** deixe vazio (ou `.` se pedir)
-   - **Runtime:** `Python 3`
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `python api_server.py`
-   - **Instance Type:** `Free`
+- `POST /api/pix/settle-debt-balance` com header `Authorization: Bearer <idToken>` deve retornar `{"ok": true}` se o saldo cobrir a dívida.
+- Após pagar um PIX de dívida, o app chama `POST /api/pix/confirm-debt` com `{"txid":"..."}` — deve retornar `{"ok": true}`.
 
-5. Clique em **"Create Web Service"**
-
-## Passo 4: Aguardar Deploy
-
-O Render vai:
-- Instalar dependências
-- Iniciar o servidor
-- Fornecer uma URL (ex: `https://smartequa-template-api.onrender.com`)
-
-⏱️ Primeiro deploy pode demorar 5-10 minutos.
-
-## Passo 5: Testar a API
-
-Acesse no navegador:
-```
-https://SEU-APP.onrender.com/
-```
-
-Deve retornar:
-```json
-{
-  "status": "online",
-  "message": "Template App API - Servidor rodando!",
-  "endpoints": ["/api/gerar-quadro-notas"]
-}
-```
-
-## Passo 6: Atualizar SmartEqua
-
-Editar `lib/services/document_generator_service.dart`:
-
-```dart
-class DocumentGeneratorService {
-  // Trocar localhost pela URL do Render
-  static const String baseUrl = 'https://SEU-APP.onrender.com';
-  
-  // ... resto do código
-}
-```
-
-Rebuild do Flutter:
-```bash
-flutter build web
-```
-
-## ⚠️ Importante
-
-### Limitações do Plano Grátis:
-- **Sleep após inatividade:** Servidor "dorme" após 15 min sem uso
-- **Primeira requisição após sleep:** Demora ~30s para acordar
-- **Solução:** Aceitar a demora ou fazer upgrade para plano pago ($7/mês)
-
-### Manter Template Atualizado:
-Sempre que modificar o template Word:
-1. Fazer commit das mudanças
-2. Push para GitHub
-3. Render faz redeploy automático
-
-## 🔧 Troubleshooting
-
-### Erro "Template não encontrado"
-- Verificar se a pasta `templates_quadros/notas/` está no repositório
-- Verificar se o arquivo `quadro_notas_template.docx` está lá
-
-### Erro de CORS
-- Já está configurado no `api_server.py` com `CORS(app)`
-
-### Logs
-- No painel do Render, aba "Logs" mostra erros em tempo real
-
-## 📝 Estrutura de Arquivos Necessária
-
-```
-Templates app/
-├── api_server.py
-├── requirements.txt
-├── Procfile
-├── runtime.txt
-├── .gitignore
-├── generators/
-│   ├── __init__.py
-│   └── quadro_notas_generator.py
-└── templates_quadros/
-    └── notas/
-        └── quadro_notas_template.docx
-```
-
-## ✅ Checklist Final
-
-- [ ] Código no GitHub
-- [ ] Deploy no Render concluído
-- [ ] URL da API funcionando
-- [ ] SmartEqua atualizado com nova URL
-- [ ] Rebuild do Flutter web
-- [ ] Teste completo de geração de Word
+Se aparecer `Servidor sem Firebase Admin`, a variável **FIREBASE_SERVICE_ACCOUNT_JSON** não está definida ou o JSON é inválido.
