@@ -7,6 +7,8 @@ Quitação de dívida: confirm-debt e settle-debt-balance (Firebase Admin no ser
 import json
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
+
 import requests
 from flask import request, jsonify
 
@@ -116,6 +118,10 @@ def register_pix_routes(app):
                 'payment_method_id': 'pix',
                 'payer': {'email': 'cliente@cantina.com'},
             }
+            # Evita PIX com validade curta por padrão do Mercado Pago.
+            payload['date_of_expiration'] = (
+                datetime.now(timezone.utc) + timedelta(days=7)
+            ).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
             headers = dict(headers)
             headers['X-Idempotency-Key'] = str(uuid.uuid4())
