@@ -27,6 +27,9 @@ register_pix_routes(app)
 from firebase_admin_routes import register_firebase_admin_routes
 register_firebase_admin_routes(app)
 
+from gdrive_sala_equacao import register_gdrive_sala_routes
+register_gdrive_sala_routes(app)
+
 def converter_desconto_extenso(desconto_str):
     """Converte desconto numérico para extenso com decimais corretos"""
     try:
@@ -70,6 +73,8 @@ def home():
             '/api/admin/delete-user',
             '/api/admin/update-password',
             '/api/admin/update-user',
+            '/api/sala-equacao/drive-status',
+            '/api/sala-equacao/upload',
         ]
     })
 
