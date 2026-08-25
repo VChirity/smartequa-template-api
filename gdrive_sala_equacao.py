@@ -1,25 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-Upload de documentos da Sala Equação para uma pasta do Google Drive.
+Arquivos da Sala Equação.
 
-Pasta raiz (pública / compartilhada):
-  https://drive.google.com/drive/folders/1RCciGsZ3yMmveqCeT7ih7Pi1cjVNTuPi
+O Google Drive com conta de serviço NÃO funciona em pasta comum do Gmail:
+a service account não tem cota ("Service Accounts do not have storage quota").
 
-Subpastas: {ano} / {turma} / {disciplina} / {Nº bimestre} / Aulas|Entregas [/ aluno]
-
-Usa FIREBASE_SERVICE_ACCOUNT_JSON (mesma conta do Admin).
-A pasta do Drive precisa ser compartilhada como EDITOR com o e-mail dessa conta.
+Solução: gravar no disco do servidor (NAS persiste; Render é backup).
+Opcional: Drive via OAuth do dono da pasta (GOOGLE_DRIVE_REFRESH_TOKEN).
 """
 import io
 import json
 import os
 import re
+import time
+import uuid
+from pathlib import Path
 
-from flask import jsonify, request
+from flask import jsonify, request, send_file
 
 DEFAULT_FOLDER_ID = '1RCciGsZ3yMmveqCeT7ih7Pi1cjVNTuPi'
 MAX_FILE_BYTES = 50 * 1024 * 1024
 DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive']
+
+
+def _upload_root():
+    raw = os.environ.get('SALA_EQUACAO_UPLOAD_DIR') or 'data/sala_equacao'
+    path = Path(raw)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _index_path():
+    return _upload_root() / 'index.json'
+
+
+def _load_index():
+    p = _index_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _save_index(idx):
+    _index_path().write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 def _folder_id():
@@ -37,15 +63,25 @@ def _sa_info():
 
 
 def _drive_service():
-    info = _sa_info()
-    if not info:
-        return None, 'Servidor sem FIREBASE_SERVICE_ACCOUNT_JSON'
+    """Só usa OAuth do usuário. Service account não tem cota no Drive pessoal."""
+    refresh = (os.environ.get('GOOGLE_DRIVE_REFRESH_TOKEN') or '').strip()
+    client_id = (os.environ.get('GOOGLE_DRIVE_CLIENT_ID') or '').strip()
+    client_secret = (os.environ.get('GOOGLE_DRIVE_CLIENT_SECRET') or '').strip()
+    if not (refresh and client_id and client_secret):
+        return None, 'drive_oauth_ausente'
     try:
-        from google.oauth2 import service_account
+        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
     except ImportError as e:
-        return None, f'Dependência Google Drive ausente: {e}'
-    creds = service_account.Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
+        return None, str(e)
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=DRIVE_SCOPES,
+    )
     service = build('drive', 'v3', credentials=creds, cache_discovery=False)
     return service, None
 
@@ -53,7 +89,7 @@ def _drive_service():
 def _verify_uid():
     try:
         import firebase_admin
-        from firebase_admin import auth, credentials, db as fb_db
+        from firebase_admin import auth, credentials
         try:
             firebase_admin.get_app()
         except ValueError:
@@ -80,6 +116,19 @@ def _safe_segment(raw, fallback='Pasta'):
     if not s:
         s = fallback
     return s[:120]
+
+
+def _safe_filename(name):
+    s = _safe_segment(name, 'documento')
+    s = re.sub(r'[<>:"|?*]', '_', s)
+    return s or 'documento'
+
+
+def _disk_folder_name(name):
+    s = _safe_segment(name, 'pasta')
+    s = re.sub(r'[^\w\-À-ÿ. ]+', '_', s, flags=re.UNICODE)
+    s = re.sub(r'\s+', '_', s).strip('_')
+    return (s or 'pasta')[:80]
 
 
 def _escape_q(name):
@@ -132,39 +181,118 @@ def _make_public(service, file_id):
         pass
 
 
+def _public_base():
+    env = (os.environ.get('SALA_EQUACAO_PUBLIC_BASE') or os.environ.get('PUBLIC_API_URL') or '').strip()
+    if env:
+        return env.rstrip('/')
+    return request.url_root.rstrip('/')
+
+
+def _file_url(file_id):
+    return f'{_public_base()}/api/sala-equacao/files/{file_id}'
+
+
+def _parse_meta(form):
+    ano = _safe_segment(form.get('ano'), str(__import__('datetime').datetime.now().year))
+    turma = _safe_segment(form.get('turma'), 'Turma')
+    disciplina = _safe_segment(form.get('disciplina'), 'Disciplina')
+    bimestre_raw = form.get('bimestre') or '1'
+    try:
+        bimestre_n = max(1, min(4, int(re.sub(r'\D', '', str(bimestre_raw)) or '1')))
+    except (TypeError, ValueError):
+        bimestre_n = 1
+    categoria = _safe_segment(form.get('categoria'), 'Aulas')
+    categoria = 'Entregas' if categoria.lower() == 'entregas' else 'Aulas'
+    aluno = (form.get('alunoNome') or '').strip()
+    segments = [ano, turma, disciplina, f'{bimestre_n}º bimestre', categoria]
+    if categoria == 'Entregas' and aluno:
+        segments.append(_safe_segment(aluno, 'Aluno'))
+    return segments
+
+
+def _save_to_disk(data, filename, mime, segments, uid):
+    file_id = uuid.uuid4().hex
+    rel_parts = [_disk_folder_name(s) for s in segments]
+    dest_dir = _upload_root().joinpath(*rel_parts)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f'{file_id}_{_safe_filename(filename)}'
+    dest = dest_dir / stored_name
+    dest.write_bytes(data)
+
+    rec = {
+        'id': file_id,
+        'fileName': filename,
+        'mimeType': mime,
+        'relPath': str(Path(*rel_parts) / stored_name).replace('\\', '/'),
+        'pathLabel': ' / '.join(segments),
+        'uploadedByUid': uid,
+        'uploadedAtMillis': int(time.time() * 1000),
+    }
+    idx = _load_index()
+    idx[file_id] = rec
+    _save_index(idx)
+    return rec
+
+
+def _upload_drive_oauth(data, filename, mime, segments):
+    service, err = _drive_service()
+    if service is None:
+        return None, err
+    from googleapiclient.http import MediaIoBaseUpload
+    parent_id = _ensure_path(service, segments, _folder_id())
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+    created = service.files().create(
+        body={'name': filename, 'parents': [parent_id]},
+        media_body=media,
+        fields='id,name,mimeType',
+        supportsAllDrives=True,
+    ).execute()
+    file_id = created['id']
+    _make_public(service, file_id)
+    return {
+        'fileId': file_id,
+        'fileName': created.get('name') or filename,
+        'mimeType': created.get('mimeType') or mime,
+        'url': f'https://drive.google.com/file/d/{file_id}/preview',
+        'viewUrl': f'https://drive.google.com/file/d/{file_id}/view',
+        'downloadUrl': f'https://drive.google.com/uc?export=download&id={file_id}',
+        'path': ' / '.join(segments),
+        'storage': 'gdrive',
+    }, None
+
+
 def register_gdrive_sala_routes(app):
     app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_BYTES
 
     @app.route('/api/sala-equacao/drive-status', methods=['GET'])
     def sala_drive_status():
-        info = _sa_info() or {}
-        email = info.get('client_email')
-        folder_id = _folder_id()
-        service, err = _drive_service()
-        reachable = False
-        detail = err
-        if service:
-            try:
-                service.files().get(
-                    fileId=folder_id,
-                    fields='id,name',
-                    supportsAllDrives=True,
-                ).execute()
-                reachable = True
-                detail = None
-            except Exception as e:
-                detail = str(e)
+        drive, _ = _drive_service()
         return jsonify({
-            'ok': reachable,
-            'folderId': folder_id,
-            'folderUrl': f'https://drive.google.com/drive/folders/{folder_id}',
-            'serviceAccountEmail': email,
-            'error': detail,
-            'hint': None if reachable else (
-                f'Compartilhe a pasta do Drive como Editor com {email}'
-                if email else 'Configure FIREBASE_SERVICE_ACCOUNT_JSON no servidor'
+            'ok': True,
+            'storage': 'gdrive-oauth' if drive else 'disk',
+            'folderId': _folder_id(),
+            'folderUrl': f'https://drive.google.com/drive/folders/{_folder_id()}',
+            'hint': (
+                'Arquivos gravados no servidor (sem cota do Google). '
+                'Drive opcional: defina GOOGLE_DRIVE_REFRESH_TOKEN do dono da pasta.'
             ),
         })
+
+    @app.route('/api/sala-equacao/files/<file_id>', methods=['GET', 'HEAD'])
+    def sala_serve_file(file_id):
+        rec = _load_index().get(file_id)
+        if not rec:
+            return jsonify({'ok': False, 'error': 'Arquivo não encontrado'}), 404
+        path = _upload_root() / rec['relPath']
+        if not path.exists():
+            return jsonify({'ok': False, 'error': 'Arquivo ausente no disco'}), 404
+        return send_file(
+            path,
+            mimetype=rec.get('mimeType') or 'application/octet-stream',
+            as_attachment=request.args.get('download') == '1',
+            download_name=rec.get('fileName') or path.name,
+            max_age=86400,
+        )
 
     @app.route('/api/sala-equacao/upload', methods=['POST'])
     def sala_drive_upload():
@@ -182,66 +310,33 @@ def register_gdrive_sala_routes(app):
         if len(data) > MAX_FILE_BYTES:
             return jsonify({'ok': False, 'error': 'Arquivo acima de 50 MB'}), 413
 
-        ano = _safe_segment(request.form.get('ano'), str(__import__('datetime').datetime.now().year))
-        turma = _safe_segment(request.form.get('turma'), 'Turma')
-        disciplina = _safe_segment(request.form.get('disciplina'), 'Disciplina')
-        bimestre_raw = request.form.get('bimestre') or '1'
-        try:
-            bimestre_n = max(1, min(4, int(str(bimestre_raw).strip()[0])))
-        except (TypeError, ValueError):
-            bimestre_n = 1
-        categoria = _safe_segment(request.form.get('categoria'), 'Aulas')
-        if categoria.lower() not in ('aulas', 'entregas'):
-            categoria = 'Aulas'
-        categoria = 'Entregas' if categoria.lower() == 'entregas' else 'Aulas'
-        aluno = (request.form.get('alunoNome') or '').strip()
-
-        segments = [ano, turma, disciplina, f'{bimestre_n}º bimestre', categoria]
-        if categoria == 'Entregas' and aluno:
-            segments.append(_safe_segment(aluno, 'Aluno'))
-
-        filename = _safe_segment(uploaded.filename, 'documento')
+        segments = _parse_meta(request.form)
+        filename = _safe_filename(uploaded.filename)
         mime = uploaded.mimetype or 'application/octet-stream'
 
-        service, derr = _drive_service()
-        if service is None:
-            return jsonify({'ok': False, 'error': derr}), 503
-
-        folder_id = _folder_id()
+        drive_payload, drive_err = (None, None)
         try:
-            parent_id = _ensure_path(service, segments, folder_id)
-            from googleapiclient.http import MediaIoBaseUpload
-            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-            created = service.files().create(
-                body={'name': filename, 'parents': [parent_id]},
-                media_body=media,
-                fields='id,name,mimeType,webViewLink,webContentLink',
-                supportsAllDrives=True,
-            ).execute()
-            file_id = created['id']
-            _make_public(service, file_id)
+            drive_payload, drive_err = _upload_drive_oauth(data, filename, mime, segments)
         except Exception as e:
-            msg = str(e)
-            info = _sa_info() or {}
-            email = info.get('client_email') or ''
-            if 'File not found' in msg or 'notFound' in msg or '404' in msg:
-                msg = (
-                    'A pasta do Drive não está acessível para o servidor. '
-                    f'Compartilhe como Editor com {email}'
-                )
-            return jsonify({'ok': False, 'error': msg, 'serviceAccountEmail': email}), 502
+            drive_err = str(e)
+            drive_payload = None
 
-        preview = f'https://drive.google.com/file/d/{file_id}/preview'
-        view = f'https://drive.google.com/file/d/{file_id}/view'
-        download = f'https://drive.google.com/uc?export=download&id={file_id}'
+        if drive_payload:
+            drive_payload['ok'] = True
+            drive_payload['uploadedByUid'] = uid
+            return jsonify(drive_payload)
+
+        rec = _save_to_disk(data, filename, mime, segments, uid)
+        url = _file_url(rec['id'])
         return jsonify({
             'ok': True,
-            'fileId': file_id,
-            'fileName': created.get('name') or filename,
-            'mimeType': created.get('mimeType') or mime,
-            'url': preview,
-            'viewUrl': view,
-            'downloadUrl': download,
-            'path': ' / '.join(segments),
+            'fileId': rec['id'],
+            'fileName': rec['fileName'],
+            'mimeType': rec['mimeType'],
+            'url': url,
+            'viewUrl': url,
+            'downloadUrl': f'{url}?download=1',
+            'path': rec['pathLabel'],
+            'storage': 'disk',
             'uploadedByUid': uid,
         })
