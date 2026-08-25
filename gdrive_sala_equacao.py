@@ -199,9 +199,16 @@ def _public_base():
     env = (os.environ.get('SALA_EQUACAO_PUBLIC_BASE') or os.environ.get('PUBLIC_API_URL') or '').strip()
     if env:
         return env.rstrip('/')
-    if request:
-        return request.url_root.rstrip('/')
-    return 'https://smartequa-template-api.onrender.com'
+    default = 'https://smartequa-template-api.onrender.com'
+    if not request:
+        return default
+    root = (request.url_root or '').rstrip('/')
+    proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip()
+    if proto == 'https' and root.startswith('http://'):
+        root = 'https://' + root[len('http://'):]
+    if 'onrender.com' in root and root.startswith('http://'):
+        root = 'https://' + root[len('http://'):]
+    return root or default
 
 
 def _redirect_uri():
