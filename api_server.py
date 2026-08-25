@@ -74,6 +74,7 @@ def home():
             '/api/admin/update-password',
             '/api/admin/update-user',
             '/api/sala-equacao/drive-status',
+            '/api/sala-equacao/drive-conectar',
             '/api/sala-equacao/upload',
         ]
     })
