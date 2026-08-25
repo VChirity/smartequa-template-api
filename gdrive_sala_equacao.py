@@ -23,7 +23,9 @@ import requests as http_requests
 from flask import jsonify, redirect, render_template_string, request, send_file
 
 DEFAULT_FOLDER_ID = '1xYGoBFkHosbgFN5hKLjn2GB_DZN0gluq'
+DELETED_FOLDER_NAME = 'deletados'
 MAX_FILE_BYTES = 50 * 1024 * 1024
+_DRIVE_ID_RE = re.compile(r'(?:/d/|id=)([a-zA-Z0-9_-]{10,})')
 DRIVE_SCOPES = [
     'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/userinfo.email',
@@ -255,6 +257,109 @@ def _verify_uid():
         return decoded.get('uid'), None
     except Exception as e:
         return None, (jsonify({'ok': False, 'error': str(e)}), 401)
+
+
+def _verify_admin():
+    uid, err = _verify_uid()
+    if err is not None:
+        return None, err
+    from firebase_admin import db
+    data = db.reference(f'usuarios/{uid}').get() or {}
+    role = str(data.get('role') or '')
+    if data.get('isProfAdmin') is True or data.get('isAdmin') is True or role in ('admin', 'profAdmin'):
+        return uid, None
+    return None, (jsonify({'ok': False, 'error': 'Só administrador pode limpar a lixeira'}), 403)
+
+
+def _file_id_from_url(url):
+    if not url or '/folders/' in str(url):
+        return None
+    m = _DRIVE_ID_RE.search(str(url))
+    return m.group(1) if m else None
+
+
+def _collect_file_ids(payload):
+    ids = []
+    if not isinstance(payload, dict):
+        return ids
+    for raw in payload.get('fileIds') or []:
+        s = str(raw).strip()
+        if s:
+            ids.append(s)
+    for raw in payload.get('urls') or []:
+        fid = _file_id_from_url(raw)
+        if fid:
+            ids.append(fid)
+    seen = set()
+    out = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
+def _deleted_folder_id(service):
+    return _find_or_create_folder(service, DELETED_FOLDER_NAME, _folder_id())
+
+
+def _list_children(service, folder_id):
+    items = []
+    page = None
+    while True:
+        res = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields='nextPageToken,files(id,name,mimeType,modifiedTime,size)',
+            pageSize=100,
+            pageToken=page,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        items.extend(res.get('files') or [])
+        page = res.get('nextPageToken')
+        if not page:
+            break
+    return items
+
+
+def _move_files_to_deleted(service, file_ids):
+    dest = _deleted_folder_id(service)
+    moved = []
+    skipped = []
+    for fid in file_ids:
+        try:
+            meta = service.files().get(
+                fileId=fid,
+                fields='id,name,mimeType,parents',
+                supportsAllDrives=True,
+            ).execute()
+            if meta.get('mimeType') == 'application/vnd.google-apps.folder':
+                skipped.append({'id': fid, 'error': 'pasta'})
+                continue
+            parents = meta.get('parents') or []
+            if dest in parents:
+                moved.append({'id': fid, 'name': meta.get('name'), 'already': True})
+                continue
+            body = {
+                'fileId': fid,
+                'addParents': dest,
+                'supportsAllDrives': True,
+                'fields': 'id,parents',
+            }
+            if parents:
+                body['removeParents'] = ','.join(parents)
+            service.files().update(**body).execute()
+            moved.append({'id': fid, 'name': meta.get('name')})
+        except Exception as e:
+            skipped.append({'id': fid, 'error': str(e)[:180]})
+    return moved, skipped
+
+
+def _delete_tree(service, file_id, mime):
+    if mime == 'application/vnd.google-apps.folder':
+        for child in _list_children(service, file_id):
+            _delete_tree(service, child['id'], child.get('mimeType'))
+    service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
 
 
 def _safe_segment(raw, fallback='Pasta'):
@@ -563,3 +668,62 @@ def register_gdrive_sala_routes(app):
             'code': 'drive_not_connected' if drive_err == 'drive_oauth_ausente' else 'drive_upload_failed',
             'connectUrl': _connect_url(),
         }), 503
+
+    @app.route('/api/sala-equacao/trash', methods=['GET'])
+    def sala_drive_trash_list():
+        uid, err = _verify_admin()
+        if err is not None:
+            return err
+        service, derr = _drive_service()
+        if service is None:
+            return jsonify({'ok': False, 'error': derr or 'Drive não autorizado'}), 503
+        dest = _deleted_folder_id(service)
+        files = []
+        for f in _list_children(service, dest):
+            files.append({
+                'id': f.get('id'),
+                'name': f.get('name'),
+                'mimeType': f.get('mimeType'),
+                'modifiedTime': f.get('modifiedTime'),
+                'url': f"https://drive.google.com/file/d/{f.get('id')}/preview",
+            })
+        return jsonify({'ok': True, 'count': len(files), 'files': files})
+
+    @app.route('/api/sala-equacao/trash', methods=['POST'])
+    def sala_drive_trash_move():
+        uid, err = _verify_uid()
+        if err is not None:
+            return err
+        payload = request.get_json(silent=True) or {}
+        ids = _collect_file_ids(payload)
+        if not ids:
+            return jsonify({'ok': True, 'moved': [], 'skipped': []})
+        service, derr = _drive_service()
+        if service is None:
+            return jsonify({'ok': False, 'error': derr or 'Drive não autorizado'}), 503
+        moved, skipped = _move_files_to_deleted(service, ids)
+        return jsonify({
+            'ok': True,
+            'moved': moved,
+            'skipped': skipped,
+            'uploadedByUid': uid,
+        })
+
+    @app.route('/api/sala-equacao/trash/empty', methods=['POST'])
+    def sala_drive_trash_empty():
+        uid, err = _verify_admin()
+        if err is not None:
+            return err
+        service, derr = _drive_service()
+        if service is None:
+            return jsonify({'ok': False, 'error': derr or 'Drive não autorizado'}), 503
+        dest = _deleted_folder_id(service)
+        deleted = 0
+        errors = []
+        for f in _list_children(service, dest):
+            try:
+                _delete_tree(service, f['id'], f.get('mimeType'))
+                deleted += 1
+            except Exception as e:
+                errors.append({'id': f.get('id'), 'error': str(e)[:180]})
+        return jsonify({'ok': True, 'deleted': deleted, 'errors': errors, 'byUid': uid})
