@@ -229,6 +229,57 @@ def _abort_settle_lock(fb_db, txid):
         pass
 
 
+def _append_debt_history(fb_db, uid, event):
+    if not uid or fb_db is None:
+        return
+    try:
+        hid = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        payload = dict(event or {})
+        payload['id'] = payload.get('id') or hid
+        payload['createdAt'] = payload.get('createdAt') or datetime.now(timezone.utc).isoformat()
+        fb_db.reference(f'cantina_debt_history/{uid}/{payload["id"]}').set(payload)
+    except Exception:
+        pass
+
+
+def _apply_debt_payment(fb_db, uid, debt, amount, payment_method, note=None):
+    """Abate [amount] da dívida. Só remove o registro pendente se zerar."""
+    if not isinstance(debt, dict):
+        return False, 'no_debt'
+    total = float(debt.get('totalAmount') or 0)
+    paid = float(debt.get('paidAmount') or 0)
+    pending = max(0.0, total - paid)
+    apply = max(0.0, float(amount or 0))
+    if apply <= 0.001:
+        return True, 'noop'
+    new_paid = min(total, paid + apply)
+    pending_after = max(0.0, total - new_paid)
+    _append_debt_history(fb_db, uid, {
+        'type': 'cleared' if pending_after <= 0.001 else 'payment',
+        'amount': min(apply, pending),
+        'pendingAfter': pending_after,
+        'totalAmount': total,
+        'paidAmount': new_paid,
+        'studentName': debt.get('studentName'),
+        'paymentMethod': payment_method,
+        'note': note,
+    })
+    ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
+    if pending_after <= 0.001:
+        try:
+            ref_debt.delete()
+        except Exception:
+            pass
+    else:
+        updated = dict(debt)
+        updated['paidAmount'] = new_paid
+        try:
+            ref_debt.set(updated)
+        except Exception:
+            return False, 'save_failed'
+    return True, 'ok'
+
+
 def _settle_approved_pix(txid, payment=None):
     """Confirma PIX pago no Mercado Pago e aplica no Firebase (app pode estar fechado)."""
     fb_db = _get_fb_db()
@@ -264,6 +315,7 @@ def _settle_approved_pix(txid, payment=None):
             debt = ref_debt.get()
             if debt:
                 used = float(entry.get('debtBalanceUsed') or 0)
+                pix_amount = float(entry.get('amount') or payment.get('transaction_amount') or 0)
                 if used > 0:
                     uref = fb_db.reference(f'usuarios/{uid}')
                     snap = uref.get()
@@ -274,10 +326,14 @@ def _settle_approved_pix(txid, payment=None):
                             'cantinaSaldo': max(0.0, current - used),
                             'cantinaNome': nome or None,
                         })
-                try:
-                    ref_debt.delete()
-                except Exception:
-                    pass
+                _apply_debt_payment(
+                    fb_db,
+                    uid,
+                    debt,
+                    pix_amount + used,
+                    'pix',
+                    note='Quitação via PIX do app',
+                )
             _cleanup_pending(fb_db, txid, uid)
             _finish_settle_lock(fb_db, txid, 'debt')
             return True, 'debt'
@@ -573,8 +629,12 @@ def register_pix_routes(app):
         nome = (snap.get('cantinaNome') or snap.get('nome') or '').strip()
         new_bal = balance - pending
         uref.update({'cantinaSaldo': new_bal, 'cantinaNome': nome or None})
-        try:
-            ref_debt.delete()
-        except Exception:
-            pass
+        _apply_debt_payment(
+            fb_db,
+            uid,
+            debt,
+            pending,
+            'wallet',
+            note='Quitação com saldo da carteira',
+        )
         return jsonify({'ok': True})
