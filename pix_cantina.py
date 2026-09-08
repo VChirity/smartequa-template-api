@@ -66,6 +66,26 @@ def _verify_bearer_uid():
         return None, (jsonify({'ok': False, 'error': str(e)}), 401)
 
 
+def _is_staff(uid):
+    """Admin, profAdmin ou a conta do tablet da cantina podem quitar dívida de outro aluno."""
+    fb_db = _get_fb_db()
+    if fb_db is None or not uid:
+        return False
+    try:
+        snap = fb_db.reference(f'usuarios/{uid}').get() or {}
+        if not isinstance(snap, dict):
+            return False
+        role = str(snap.get('role') or '').strip().lower()
+        if role in ('admin', 'profadmin'):
+            return True
+        if snap.get('isProfAdmin') is True:
+            return True
+        email = str(snap.get('email') or '').strip().lower()
+        return email == 'cantina@colegioequacao.com'
+    except Exception:
+        return False
+
+
 def _webhook_public_url():
     return (
         os.environ.get('PIX_WEBHOOK_URL')
@@ -586,7 +606,7 @@ def register_pix_routes(app):
         entry = _load_pending_entry(fb_db, txid, uid)
         if isinstance(entry, dict):
             entry_uid = (entry.get('userId') or '').strip()
-            if entry_uid and entry_uid != uid:
+            if entry_uid and entry_uid != uid and not _is_staff(uid):
                 return jsonify({'ok': False, 'error': 'Usuario nao corresponde ao PIX'}), 403
         ok, reason = _settle_approved_pix(txid)
         if ok:
@@ -605,6 +625,11 @@ def register_pix_routes(app):
         fb_db = _get_fb_db()
         if fb_db is None:
             return jsonify({'ok': False, 'error': 'Firebase Admin n├úo configurado'}), 503
+        body = request.get_json(silent=True) or {}
+        target = (body.get('userId') or '').strip() or uid
+        if target != uid and not _is_staff(uid):
+            return jsonify({'ok': False, 'error': 'Sem permissao para quitar divida de outro usuario'}), 403
+        uid = target
         ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
         debt = ref_debt.get()
         if not debt or not isinstance(debt, dict):
