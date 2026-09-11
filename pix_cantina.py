@@ -86,6 +86,44 @@ def _is_staff(uid):
         return False
 
 
+def _money(v):
+    if v is None or v is False:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace('R$', '').replace(' ', '').replace(',', '.')
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _str_ids(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    if isinstance(raw, dict):
+        keys = sorted(
+            (int(k) for k in raw.keys() if str(k).isdigit()),
+        )
+        out = []
+        for k in keys:
+            v = raw.get(str(k), raw.get(k))
+            s = str(v or '').strip()
+            if s:
+                out.append(s)
+        return out
+    s = str(raw).strip()
+    return [s] if s else []
+
+
+def _txid_applied(debt, txid):
+    if not txid or not isinstance(debt, dict):
+        return False
+    return str(txid) in _str_ids(debt.get('appliedPixTxids'))
+
+
 def _webhook_public_url():
     return (
         os.environ.get('PIX_WEBHOOK_URL')
@@ -202,14 +240,18 @@ def _dec_stock(fb_db, items):
 
 
 def _begin_settle_lock(fb_db, txid):
+    """Adquire lock. 'acquired' | 'settled' | 'busy' | 'error'.
+    Não reprocessa um PIX já marcado settled. processing antigo (>120s) pode retentar.
+    """
     ref = fb_db.reference(f'cantina_pix_settled/{txid}')
-    started = {'ok': False}
+    started = {'state': 'error'}
     now = datetime.now(timezone.utc)
 
     def txn(cur):
         if isinstance(cur, dict):
             st = cur.get('status')
             if st == 'settled':
+                started['state'] = 'settled'
                 return cur
             if st == 'processing':
                 raw = str(cur.get('at') or '')
@@ -218,17 +260,19 @@ def _begin_settle_lock(fb_db, txid):
                     if at.tzinfo is None:
                         at = at.replace(tzinfo=timezone.utc)
                     if now - at < timedelta(seconds=120):
+                        started['state'] = 'busy'
                         return cur
                 except Exception:
+                    started['state'] = 'busy'
                     return cur
-        started['ok'] = True
+        started['state'] = 'acquired'
         return {'status': 'processing', 'at': now.isoformat()}
 
     try:
         ref.transaction(txn)
     except Exception:
-        return False
-    return started['ok']
+        return 'error'
+    return started['state']
 
 
 def _finish_settle_lock(fb_db, txid, kind):
@@ -262,27 +306,35 @@ def _append_debt_history(fb_db, uid, event):
         pass
 
 
-def _apply_debt_payment(fb_db, uid, debt, amount, payment_method, note=None):
-    """Abate [amount] da dívida. Só remove o registro pendente se zerar."""
+def _apply_debt_payment(fb_db, uid, debt, amount, payment_method, note=None, txid=None):
+    """Abate [amount] da dívida. Só remove o registro pendente se zerar.
+    O mesmo [txid] nunca abate duas vezes."""
     if not isinstance(debt, dict):
         return False, 'no_debt'
-    total = float(debt.get('totalAmount') or 0)
-    paid = float(debt.get('paidAmount') or 0)
+    txid = str(txid or '').strip()
+    if txid and _txid_applied(debt, txid):
+        return True, 'already'
+    total = _money(debt.get('totalAmount'))
+    paid = _money(debt.get('paidAmount'))
     pending = max(0.0, total - paid)
-    apply = max(0.0, float(amount or 0))
+    apply = max(0.0, _money(amount))
     if apply <= 0.001:
         return True, 'noop'
-    new_paid = min(total, paid + apply)
+    new_paid = min(total, paid + apply) if total > 0 else paid + apply
     pending_after = max(0.0, total - new_paid)
+    applied = _str_ids(debt.get('appliedPixTxids'))
+    if txid and txid not in applied:
+        applied.append(txid)
     _append_debt_history(fb_db, uid, {
         'type': 'cleared' if pending_after <= 0.001 else 'payment',
-        'amount': min(apply, pending),
+        'amount': min(apply, pending) if pending > 0 else apply,
         'pendingAfter': pending_after,
         'totalAmount': total,
         'paidAmount': new_paid,
         'studentName': debt.get('studentName'),
         'paymentMethod': payment_method,
         'note': note,
+        'txid': txid or None,
     })
     ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
     if pending_after <= 0.001:
@@ -292,7 +344,9 @@ def _apply_debt_payment(fb_db, uid, debt, amount, payment_method, note=None):
             pass
     else:
         updated = dict(debt)
+        updated['totalAmount'] = total
         updated['paidAmount'] = new_paid
+        updated['appliedPixTxids'] = applied
         try:
             ref_debt.set(updated)
         except Exception:
@@ -300,7 +354,7 @@ def _apply_debt_payment(fb_db, uid, debt, amount, payment_method, note=None):
     return True, 'ok'
 
 
-def _settle_approved_pix(txid, payment=None):
+def _settle_approved_pix(txid, payment=None, entry=None):
     """Confirma PIX pago no Mercado Pago e aplica no Firebase (app pode estar fechado)."""
     fb_db = _get_fb_db()
     if fb_db is None:
@@ -312,9 +366,10 @@ def _settle_approved_pix(txid, payment=None):
         payment = _mp_get_payment(txid)
     if not payment or payment.get('status') != 'approved':
         return False, 'not_approved'
-    entry = _load_pending_entry(fb_db, txid)
+    if entry is None:
+        entry = _load_pending_entry(fb_db, txid)
     if not isinstance(entry, dict):
-        return True, 'no_pending'
+        return False, 'no_pending'
     uid = str(entry.get('userId') or '').strip()
     kind = str(entry.get('type') or '').strip() or 'balance'
     if not uid:
@@ -323,24 +378,32 @@ def _settle_approved_pix(txid, payment=None):
         _cleanup_pending(fb_db, txid, uid)
         _finish_settle_lock(fb_db, txid, kind)
         return True, 'already'
-    if not _begin_settle_lock(fb_db, txid):
-        return True, 'locked'
+    lock_state = _begin_settle_lock(fb_db, txid)
+    if lock_state == 'settled':
+        _cleanup_pending(fb_db, txid, uid)
+        return True, 'already'
+    if lock_state != 'acquired':
+        return False, 'locked'
     try:
         pagante = _payer_name(payment)
         created = str(entry.get('createdAt') or datetime.now(timezone.utc).isoformat())
-        amount = float(entry.get('amount') or payment.get('transaction_amount') or 0)
+        amount = _money(entry.get('amount') or payment.get('transaction_amount'))
         buyer = str(entry.get('buyerName') or entry.get('sourceProductName') or '').strip()
         if kind == 'debt':
             ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
             debt = ref_debt.get()
+            if isinstance(debt, dict) and _txid_applied(debt, txid):
+                _cleanup_pending(fb_db, txid, uid)
+                _finish_settle_lock(fb_db, txid, 'debt')
+                return True, 'already'
             if debt:
-                used = float(entry.get('debtBalanceUsed') or 0)
-                pix_amount = float(entry.get('amount') or payment.get('transaction_amount') or 0)
+                used = _money(entry.get('debtBalanceUsed'))
+                pix_amount = _money(entry.get('amount') or payment.get('transaction_amount'))
                 if used > 0:
                     uref = fb_db.reference(f'usuarios/{uid}')
                     snap = uref.get()
                     if isinstance(snap, dict):
-                        current = float(snap.get('cantinaSaldo') or 0)
+                        current = _money(snap.get('cantinaSaldo'))
                         nome = (snap.get('cantinaNome') or snap.get('nome') or '').strip()
                         uref.update({
                             'cantinaSaldo': max(0.0, current - used),
@@ -353,6 +416,7 @@ def _settle_approved_pix(txid, payment=None):
                     pix_amount + used,
                     'pix',
                     note='Quitação via PIX do app',
+                    txid=txid,
                 )
             _cleanup_pending(fb_db, txid, uid)
             _finish_settle_lock(fb_db, txid, 'debt')
@@ -603,15 +667,137 @@ def register_pix_routes(app):
         txid = (body.get('txid') or '').strip()
         if not txid:
             return jsonify({'ok': False, 'error': 'txid obrigatorio'}), 400
+        payment = _mp_get_payment(txid)
+        if not payment or payment.get('status') != 'approved':
+            return jsonify({'ok': False, 'error': 'not_approved'}), 400
         entry = _load_pending_entry(fb_db, txid, uid)
+        target = uid
         if isinstance(entry, dict):
             entry_uid = (entry.get('userId') or '').strip()
             if entry_uid and entry_uid != uid and not _is_staff(uid):
                 return jsonify({'ok': False, 'error': 'Usuario nao corresponde ao PIX'}), 403
-        ok, reason = _settle_approved_pix(txid)
+            if entry_uid:
+                target = entry_uid
+        else:
+            body_uid = (body.get('userId') or '').strip()
+            if body_uid and body_uid != uid and not _is_staff(uid):
+                return jsonify({'ok': False, 'error': 'Sem permissao'}), 403
+            if body_uid:
+                target = body_uid
+            entry = {
+                'userId': target,
+                'type': 'debt',
+                'amount': payment.get('transaction_amount') or 0,
+                'debtBalanceUsed': body.get('debtBalanceUsed') or 0,
+            }
+        entry = dict(entry)
+        entry['type'] = 'debt'
+        entry['userId'] = target
+        ok, reason = _settle_approved_pix(txid, payment, entry=entry)
         if ok:
-            return jsonify({'ok': True, 'alreadyCleared': reason in ('already', 'no_pending')})
+            return jsonify({'ok': True, 'alreadyCleared': reason in ('already',)})
         return jsonify({'ok': False, 'error': reason}), 400
+
+    @app.route('/api/cantina/merge-debt', methods=['POST'])
+    def cantina_merge_debt():
+        """Incorpora uma compra na dívida sem substituir o total anterior (transação no RTDB)."""
+        uid, err = _verify_bearer_uid()
+        if err:
+            return err
+        if not _is_staff(uid):
+            return jsonify({'ok': False, 'error': 'Sem permissao'}), 403
+        fb_db = _get_fb_db()
+        if fb_db is None:
+            return jsonify({'ok': False, 'error': 'Firebase Admin nao configurado'}), 503
+        body = request.get_json() or {}
+        target = (body.get('userId') or '').strip()
+        purchase_id = str(body.get('purchaseId') or '').strip()
+        add_total = _money(body.get('total'))
+        paid_now = max(0.0, _money(body.get('paidNow')))
+        if not target or not purchase_id or add_total <= 0:
+            return jsonify({'ok': False, 'error': 'Dados invalidos'}), 400
+        items = body.get('items') if isinstance(body.get('items'), list) else []
+        student_name = str(body.get('studentName') or '').strip()
+        created_by = str(body.get('createdByLabel') or '').strip()
+        created_at = str(body.get('createdAt') or datetime.now(timezone.utc).isoformat())
+        ref_debt = fb_db.reference(f'cantina_pending_debts/{target}')
+        result = {'ok': False}
+
+        def txn(cur):
+            if not isinstance(cur, dict):
+                result['ok'] = True
+                result['created'] = True
+                return {
+                    'id': purchase_id,
+                    'items': items,
+                    'totalAmount': add_total,
+                    'paidAmount': min(paid_now, add_total),
+                    'studentName': student_name,
+                    'studentUserId': target,
+                    'createdAt': created_at,
+                    'createdByLabel': created_by,
+                    'appliedPurchaseIds': [purchase_id],
+                    'appliedPixTxids': [],
+                }
+            applied = _str_ids(cur.get('appliedPurchaseIds'))
+            if purchase_id in applied:
+                result['ok'] = True
+                result['duplicate'] = True
+                return cur
+            old_items = cur.get('items') if isinstance(cur.get('items'), list) else []
+            if isinstance(cur.get('items'), dict):
+                old_items = []
+                for k in sorted(
+                    (int(x) for x in cur['items'].keys() if str(x).isdigit())
+                ):
+                    v = cur['items'].get(str(k), cur['items'].get(k))
+                    if isinstance(v, dict):
+                        old_items.append(v)
+            new_total = _money(cur.get('totalAmount')) + add_total
+            new_paid = _money(cur.get('paidAmount')) + paid_now
+            applied.append(purchase_id)
+            updated = dict(cur)
+            updated['items'] = old_items + items
+            updated['totalAmount'] = new_total
+            updated['paidAmount'] = new_paid
+            updated['studentName'] = (updated.get('studentName') or student_name)
+            updated['studentUserId'] = target
+            updated['createdByLabel'] = updated.get('createdByLabel') or created_by
+            updated['appliedPurchaseIds'] = applied
+            result['ok'] = True
+            result['merged'] = True
+            return updated
+
+        try:
+            ref_debt.transaction(txn)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+        if not result.get('ok'):
+            return jsonify({'ok': False, 'error': 'merge_failed'}), 500
+        snap = ref_debt.get() if not result.get('duplicate') else None
+        if result.get('created'):
+            _append_debt_history(fb_db, target, {
+                'type': 'created',
+                'amount': add_total,
+                'pendingAfter': max(0.0, add_total - paid_now),
+                'totalAmount': add_total,
+                'paidAmount': paid_now,
+                'studentName': student_name,
+                'createdByLabel': created_by,
+                'note': f'Compra {purchase_id}',
+            })
+        elif result.get('merged') and isinstance(snap, dict):
+            _append_debt_history(fb_db, target, {
+                'type': 'increased',
+                'amount': add_total,
+                'pendingAfter': max(0.0, _money(snap.get('totalAmount')) - _money(snap.get('paidAmount'))),
+                'totalAmount': snap.get('totalAmount'),
+                'paidAmount': snap.get('paidAmount'),
+                'studentName': snap.get('studentName') or student_name,
+                'createdByLabel': created_by,
+                'note': f'Compra {purchase_id} incorporada',
+            })
+        return jsonify({'ok': True, **{k: v for k, v in result.items() if k != 'ok'}})
 
     @app.route('/api/pix/settle-debt-balance', methods=['POST'])
     def pix_settle_debt_balance():
@@ -634,10 +820,22 @@ def register_pix_routes(app):
         debt = ref_debt.get()
         if not debt or not isinstance(debt, dict):
             return jsonify({'ok': False, 'error': 'Sem d├¡vida pendente'}), 400
-        total = float(debt.get('totalAmount') or 0)
-        paid = float(debt.get('paidAmount') or 0)
+        total = _money(debt.get('totalAmount'))
+        paid = _money(debt.get('paidAmount'))
         pending = max(0.0, total - paid)
         if pending <= 0.001:
+            if total <= 0.001:
+                return jsonify({'ok': False, 'error': 'divida_inconsistente'}), 400
+            _append_debt_history(fb_db, uid, {
+                'type': 'cleared',
+                'amount': 0,
+                'pendingAfter': 0.0,
+                'totalAmount': total,
+                'paidAmount': paid,
+                'studentName': debt.get('studentName'),
+                'paymentMethod': 'wallet',
+                'note': 'Pendente já estava zerado',
+            })
             try:
                 ref_debt.delete()
             except Exception:
@@ -648,7 +846,7 @@ def register_pix_routes(app):
         snap = uref.get()
         if not isinstance(snap, dict):
             return jsonify({'ok': False, 'error': 'Usu├írio n├úo encontrado'}), 400
-        balance = float(snap.get('cantinaSaldo') or 0)
+        balance = _money(snap.get('cantinaSaldo'))
         if balance + 1e-6 < pending:
             return jsonify({'ok': False, 'error': 'Saldo insuficiente'}), 400
         nome = (snap.get('cantinaNome') or snap.get('nome') or '').strip()
