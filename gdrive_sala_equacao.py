@@ -28,6 +28,7 @@ MAX_FILE_BYTES = 50 * 1024 * 1024
 _DRIVE_ID_RE = re.compile(r'(?:/d/|id=)([a-zA-Z0-9_-]{10,})')
 DRIVE_SCOPES = [
     'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/userinfo.email',
     'openid',
 ]
@@ -269,6 +270,186 @@ def _verify_admin():
     if data.get('isProfAdmin') is True or data.get('isAdmin') is True or role in ('admin', 'profAdmin'):
         return uid, None
     return None, (jsonify({'ok': False, 'error': 'Só administrador pode limpar a lixeira'}), 403)
+
+
+def _verify_professor_or_admin():
+    uid, err = _verify_uid()
+    if err is not None:
+        return None, err
+    from firebase_admin import db
+    data = db.reference(f'usuarios/{uid}').get() or {}
+    role = str(data.get('role') or '')
+    if data.get('isProfAdmin') is True or data.get('isAdmin') is True or role in (
+        'admin', 'profAdmin', 'professor',
+    ):
+        return uid, data, None
+    return None, None, (jsonify({'ok': False, 'error': 'Só professor ou admin pode avisar a turma'}), 403)
+
+
+def _oauth_creds():
+    refresh = _refresh_token()
+    client_id = _client_id()
+    client_secret = _client_secret()
+    if not (refresh and client_id and client_secret):
+        return None, 'drive_oauth_ausente'
+    try:
+        from google.oauth2.credentials import Credentials
+    except ImportError as e:
+        return None, str(e)
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh,
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=DRIVE_SCOPES,
+    )
+    return creds, None
+
+
+def _gmail_service():
+    creds, err = _oauth_creds()
+    if creds is None:
+        return None, err
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as e:
+        return None, str(e)
+    service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
+    return service, None
+
+
+def _collect_aluno_emails(aluno_ids):
+    from firebase_admin import db
+    seen = set()
+    out = []
+    for raw in aluno_ids or []:
+        uid = str(raw).strip()
+        if not uid:
+            continue
+        data = db.reference(f'usuarios/{uid}').get() or {}
+        email = str(data.get('email') or '').strip()
+        if email and '@' in email:
+            key = email.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(email)
+    return out
+
+
+def _montar_email_sala(payload):
+    tipo = str(payload.get('tipo') or 'atividade')
+    turma = str(payload.get('turmaLabel') or '').strip()
+    disciplina = str(payload.get('disciplina') or '').strip()
+    titulo = str(payload.get('titulo') or '').strip()
+    descricao = str(payload.get('descricao') or '').strip()
+    prof_nome = str(payload.get('professorNome') or '').strip()
+    pts = payload.get('checkpointPontos')
+    tem_entrega = bool(payload.get('temEntrega'))
+    data_entrega = str(payload.get('dataEntrega') or '').strip()
+    if tipo == 'checkpoint':
+        assunto = f'[Sala Equação] Novo Check Point — {titulo or disciplina}'
+        linhas = [
+            'Olá!',
+            '',
+            'Um Check Point novo foi publicado na Sala Equação.',
+            f'Turma: {turma}' if turma else '',
+            f'Disciplina: {disciplina}' if disciplina else '',
+            f'Título: {titulo}' if titulo else '',
+            f'Professor: {prof_nome}' if prof_nome else '',
+        ]
+        if pts not in (None, ''):
+            linhas.append(f'Pontuação: {pts} ponto(s) (1 a 3).')
+        if descricao:
+            linhas.extend(['', 'Resumo:', descricao])
+        linhas.extend([
+            '',
+            'Abra o Smart Equação → Check Point para ver e acompanhar.',
+        ])
+    else:
+        assunto = f'[Sala Equação] Nova atividade — {titulo or disciplina}'
+        linhas = [
+            'Olá!',
+            '',
+            'Uma atividade nova foi publicada na Sala Equação.',
+            f'Turma: {turma}' if turma else '',
+            f'Disciplina: {disciplina}' if disciplina else '',
+            f'Título: {titulo}' if titulo else '',
+            f'Professor: {prof_nome}' if prof_nome else '',
+        ]
+        if tem_entrega:
+            linhas.append('Há trabalho para entregar pela plataforma (Sala Equação).')
+            if data_entrega:
+                linhas.append(f'Data de entrega: {data_entrega[:10]}')
+        else:
+            linhas.append('Não há dever obrigatório para enviar pela plataforma.')
+        if pts not in (None, ''):
+            linhas.append(f'Vale Check Point: {pts} ponto(s).')
+        else:
+            linhas.append('Não vale Check Point.')
+        if descricao:
+            linhas.extend(['', 'Resumo:', descricao])
+        linhas.extend([
+            '',
+            'Abra o Smart Equação → Sala Equação para ver a atividade completa.',
+        ])
+    corpo = '\n'.join([ln for ln in linhas if ln is not None]).strip() + '\n'
+    return assunto, corpo
+
+
+def _send_via_gmail(to_emails, subject, body, from_email, from_name, reply_to):
+    import base64
+    from email.mime.text import MIMEText
+    from email.utils import formataddr
+    service, err = _gmail_service()
+    if service is None:
+        return False, err or 'gmail_ausente'
+    sent = 0
+    last_err = None
+    for dest in to_emails:
+        try:
+            msg = MIMEText(body, 'plain', 'utf-8')
+            msg['to'] = dest
+            msg['subject'] = subject
+            if from_email:
+                msg['from'] = formataddr((from_name or 'Sala Equação', from_email))
+            if reply_to and '@' in reply_to:
+                msg['reply-to'] = formataddr((from_name or '', reply_to))
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('ascii')
+            service.users().messages().send(userId='me', body={'raw': raw}).execute()
+            sent += 1
+        except Exception as e:
+            last_err = str(e)
+    if sent == 0:
+        return False, last_err or 'falha_gmail'
+    return True, f'enviados:{sent}'
+
+
+def _send_via_smtp(to_emails, subject, body, from_name, reply_to):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.utils import formataddr
+    host = (os.environ.get('SMTP_HOST') or 'smtp.gmail.com').strip()
+    port = int(os.environ.get('SMTP_PORT') or '587')
+    user = (os.environ.get('SMTP_USER') or '').strip()
+    password = (os.environ.get('SMTP_PASS') or os.environ.get('SMTP_PASSWORD') or '').strip()
+    if not user or not password:
+        return False, 'smtp_nao_configurado'
+    from_email = (os.environ.get('SMTP_FROM') or user).strip()
+    msg = MIMEText(body, 'plain', 'utf-8')
+    msg['subject'] = subject
+    msg['from'] = formataddr((from_name or 'Sala Equação', from_email))
+    msg['to'] = ', '.join(to_emails)
+    if reply_to and '@' in reply_to:
+        msg['reply-to'] = formataddr((from_name or '', reply_to))
+    try:
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(user, password)
+            smtp.sendmail(from_email, to_emails, msg.as_string())
+        return True, f'enviados:{len(to_emails)}'
+    except Exception as e:
+        return False, str(e)
 
 
 def _file_id_from_url(url):
@@ -727,3 +908,36 @@ def register_gdrive_sala_routes(app):
             except Exception as e:
                 errors.append({'id': f.get('id'), 'error': str(e)[:180]})
         return jsonify({'ok': True, 'deleted': deleted, 'errors': errors, 'byUid': uid})
+
+    @app.route('/api/sala-equacao/notify-email', methods=['POST'])
+    def sala_notify_email():
+        uid, user_data, err = _verify_professor_or_admin()
+        if err is not None:
+            return err
+        payload = request.get_json(silent=True) or {}
+        aluno_ids = payload.get('alunoIds') or []
+        emails = _collect_aluno_emails(aluno_ids)
+        if not emails:
+            return jsonify({'ok': True, 'sent': 0, 'reason': 'sem_emails'})
+        assunto, corpo = _montar_email_sala(payload)
+        prof_email = str(payload.get('professorEmail') or '').strip()
+        if not prof_email or '@' not in prof_email:
+            prof_email = str((user_data or {}).get('email') or '').strip()
+        prof_nome = str(payload.get('professorNome') or (user_data or {}).get('nome') or 'Sala Equação').strip()
+        oauth_email = (_oauth_saved().get('email') or '').strip()
+        from_email = oauth_email or prof_email
+        ok, detail = _send_via_gmail(
+            emails, assunto, corpo,
+            from_email=from_email,
+            from_name=prof_nome or 'Sala Equação',
+            reply_to=prof_email,
+        )
+        if not ok:
+            ok, detail = _send_via_smtp(
+                emails, assunto, corpo,
+                from_name=prof_nome or 'Sala Equação',
+                reply_to=prof_email,
+            )
+        if not ok:
+            return jsonify({'ok': False, 'error': detail or 'falha_envio', 'needReauth': True}), 503
+        return jsonify({'ok': True, 'sent': len(emails), 'detail': detail, 'from': from_email})
