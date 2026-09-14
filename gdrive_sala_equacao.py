@@ -275,7 +275,7 @@ def _verify_admin():
 def _verify_professor_or_admin():
     uid, err = _verify_uid()
     if err is not None:
-        return None, err
+        return None, None, err
     from firebase_admin import db
     data = db.reference(f'usuarios/{uid}').get() or {}
     role = str(data.get('role') or '')
@@ -319,21 +319,41 @@ def _gmail_service():
     return service, None
 
 
-def _collect_aluno_emails(aluno_ids):
+def _add_email(seen, out, email):
+    email = str(email or '').strip()
+    if email and '@' in email:
+        key = email.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(email)
+
+
+def _collect_aluno_emails(aluno_ids, turma_firebase=None):
     from firebase_admin import db
     seen = set()
     out = []
-    for raw in aluno_ids or []:
-        uid = str(raw).strip()
-        if not uid:
-            continue
+    ids_set = {str(i).strip() for i in (aluno_ids or []) if str(i).strip()}
+    for uid in ids_set:
         data = db.reference(f'usuarios/{uid}').get() or {}
-        email = str(data.get('email') or '').strip()
-        if email and '@' in email:
-            key = email.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(email)
+        if isinstance(data, dict):
+            _add_email(seen, out, data.get('email'))
+    turma = str(turma_firebase or '').strip()
+    if turma:
+        raw = db.reference(f'turmas/{turma}/alunos').get()
+        items = []
+        if isinstance(raw, list):
+            items = [x for x in raw if isinstance(x, dict)]
+        elif isinstance(raw, dict):
+            items = [v for v in raw.values() if isinstance(v, dict)]
+        for a in items:
+            aid = str(a.get('id') or a.get('firebaseId') or a.get('uid') or '').strip()
+            if ids_set and aid and aid not in ids_set:
+                continue
+            _add_email(seen, out, a.get('email'))
+            if aid and aid not in ids_set:
+                data = db.reference(f'usuarios/{aid}').get() or {}
+                if isinstance(data, dict):
+                    _add_email(seen, out, data.get('email'))
     return out
 
 
@@ -911,33 +931,37 @@ def register_gdrive_sala_routes(app):
 
     @app.route('/api/sala-equacao/notify-email', methods=['POST'])
     def sala_notify_email():
-        uid, user_data, err = _verify_professor_or_admin()
-        if err is not None:
-            return err
-        payload = request.get_json(silent=True) or {}
-        aluno_ids = payload.get('alunoIds') or []
-        emails = _collect_aluno_emails(aluno_ids)
-        if not emails:
-            return jsonify({'ok': True, 'sent': 0, 'reason': 'sem_emails'})
-        assunto, corpo = _montar_email_sala(payload)
-        prof_email = str(payload.get('professorEmail') or '').strip()
-        if not prof_email or '@' not in prof_email:
-            prof_email = str((user_data or {}).get('email') or '').strip()
-        prof_nome = str(payload.get('professorNome') or (user_data or {}).get('nome') or 'Sala Equação').strip()
-        oauth_email = (_oauth_saved().get('email') or '').strip()
-        from_email = oauth_email or prof_email
-        ok, detail = _send_via_gmail(
-            emails, assunto, corpo,
-            from_email=from_email,
-            from_name=prof_nome or 'Sala Equação',
-            reply_to=prof_email,
-        )
-        if not ok:
-            ok, detail = _send_via_smtp(
+        try:
+            uid, user_data, err = _verify_professor_or_admin()
+            if err is not None:
+                return err
+            payload = request.get_json(silent=True) or {}
+            aluno_ids = payload.get('alunoIds') or []
+            turma_fb = str(payload.get('turmaFirebaseNome') or payload.get('turmaLabel') or '').strip()
+            emails = _collect_aluno_emails(aluno_ids, turma_fb)
+            if not emails:
+                return jsonify({'ok': True, 'sent': 0, 'reason': 'sem_emails'})
+            assunto, corpo = _montar_email_sala(payload)
+            prof_email = str(payload.get('professorEmail') or '').strip()
+            if not prof_email or '@' not in prof_email:
+                prof_email = str((user_data or {}).get('email') or '').strip()
+            prof_nome = str(payload.get('professorNome') or (user_data or {}).get('nome') or 'Sala Equação').strip()
+            oauth_email = (_oauth_saved().get('email') or '').strip()
+            from_email = oauth_email or prof_email
+            ok, detail = _send_via_gmail(
                 emails, assunto, corpo,
+                from_email=from_email,
                 from_name=prof_nome or 'Sala Equação',
                 reply_to=prof_email,
             )
-        if not ok:
-            return jsonify({'ok': False, 'error': detail or 'falha_envio', 'needReauth': True}), 503
-        return jsonify({'ok': True, 'sent': len(emails), 'detail': detail, 'from': from_email})
+            if not ok:
+                ok, detail = _send_via_smtp(
+                    emails, assunto, corpo,
+                    from_name=prof_nome or 'Sala Equação',
+                    reply_to=prof_email,
+                )
+            if not ok:
+                return jsonify({'ok': False, 'error': detail or 'falha_envio', 'needReauth': True}), 503
+            return jsonify({'ok': True, 'sent': len(emails), 'detail': detail, 'from': from_email})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)[:300]}), 500
