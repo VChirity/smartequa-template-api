@@ -14,6 +14,7 @@ Estas rotas permitem:
 """
 
 from flask import Blueprint, request, jsonify
+import hashlib
 import os
 import json
 
@@ -256,50 +257,98 @@ def update_password():
         return jsonify({'error': f'Erro ao atualizar senha: {str(e)}'}), 500
 
 
+def _normalize_login_email(raw):
+    email = (raw or '').strip().lower().replace(' ', '')
+    if not email:
+        return ''
+    if '@' not in email:
+        email = email + '@colegioequacao.com'
+    return email
+
+
+def _dup_hash(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _sync_duplicate_email(db, old_email, new_email):
+    old_n = _normalize_login_email(old_email)
+    new_n = _normalize_login_email(new_email)
+    if old_n and old_n != new_n:
+        db.reference(f'duplicate_check/emails/{_dup_hash(old_n)}').delete()
+    if new_n:
+        db.reference(f'duplicate_check/emails/{_dup_hash(new_n)}').set(True)
+
+
 @firebase_admin_bp.route('/update-user', methods=['POST'])
 def update_user():
     """
-    Atualiza dados de um usuário no Firebase Auth e Realtime Database.
-    Requer token de admin no header Authorization.
-    Body JSON: { "userId": "uid", "email": "novo@email.com", "nome": "Nome", ... }
+    Atualiza nome, e-mail e senha no Firebase Auth e no Realtime Database.
+    O e-mail do banco só muda depois que o login (Auth) aceitar.
+    Body JSON: { "userId", "email", "nome", "newPassword", "telefone", "dadosAdicionais" }
     """
     if not _init_firebase():
         return jsonify({'error': 'Firebase Admin não configurado', 'configured': False}), 503
-    
+
     auth_header = request.headers.get('Authorization', '')
     id_token = auth_header.replace('Bearer ', '') if auth_header.startswith('Bearer ') else auth_header
-    
+
     admin_uid, error = _verify_request_token(id_token)
     if error:
         return jsonify({'error': error}), 401
-    
+
     try:
         from firebase_admin import auth, db
-        
+
         body = request.get_json() or {}
         user_id = body.get('userId')
-        
         if not user_id:
             return jsonify({'error': 'userId é obrigatório'}), 400
-        
-        new_email = body.get('email')
-        nome = body.get('nome')
+
+        new_email = _normalize_login_email(body.get('email'))
+        nome = (body.get('nome') or '').strip()
         telefone = body.get('telefone')
         dados_adicionais = body.get('dadosAdicionais')
-        
+        new_password = body.get('newPassword') or body.get('password') or ''
+        if isinstance(new_password, str):
+            new_password = new_password.strip()
+        else:
+            new_password = ''
+
+        if new_email and '@' not in new_email:
+            return jsonify({'error': 'E-mail inválido.'}), 400
+        if new_password and len(new_password) < 6:
+            return jsonify({'error': 'A senha deve ter pelo menos 6 caracteres.'}), 400
+
+        ref = db.reference(f'usuarios/{user_id}')
+        atual = ref.get() or {}
+        email_atual = _normalize_login_email(atual.get('email'))
+
+        auth_kwargs = {}
+        if new_email and new_email != email_atual:
+            auth_kwargs['email'] = new_email
+        if new_password:
+            auth_kwargs['password'] = new_password
+
         auth_updated = False
-        db_updated = False
-        
-        if new_email:
+        if auth_kwargs:
             try:
-                auth.update_user(user_id, email=new_email)
+                auth.update_user(user_id, **auth_kwargs)
                 auth_updated = True
-                print(f'Email do usuário {user_id} atualizado para {new_email} no Auth')
+                print(f'Auth do usuário {user_id} atualizado: {list(auth_kwargs.keys())}')
             except auth.UserNotFoundError:
-                print(f'Usuário {user_id} não encontrado no Auth')
+                return jsonify({
+                    'error': 'Esta conta não existe no login. O e-mail e a senha do banco não foram alterados.',
+                }), 404
             except Exception as e:
-                print(f'Aviso: Erro ao atualizar email no Auth: {e}')
-        
+                msg = str(e)
+                baixo = msg.lower()
+                if 'email_exists' in baixo or 'already exists' in baixo or 'email already' in baixo:
+                    return jsonify({'error': 'Esse e-mail já está em uso por outra conta. Nada foi alterado.'}), 409
+                print(f'Erro ao atualizar Auth de {user_id}: {e}')
+                return jsonify({
+                    'error': f'Não foi possível atualizar o login (e-mail/senha). Nada foi alterado no banco. {msg}',
+                }), 400
+
         db_data = {}
         if new_email:
             db_data['email'] = new_email
@@ -309,20 +358,25 @@ def update_user():
             db_data['telefone'] = telefone
         if dados_adicionais:
             db_data['dadosAdicionais'] = dados_adicionais
-        
+
+        db_updated = False
         if db_data:
-            ref = db.reference(f'usuarios/{user_id}')
             ref.update(db_data)
             db_updated = True
-            print(f'Dados do usuário {user_id} atualizados no Database')
-        
+            if new_email:
+                try:
+                    _sync_duplicate_email(db, atual.get('email'), new_email)
+                except Exception as e:
+                    print(f'Aviso: duplicate_check de e-mail: {e}')
+
         return jsonify({
             'success': True,
             'authUpdated': auth_updated,
             'dbUpdated': db_updated,
-            'message': 'Dados atualizados com sucesso'
+            'email': new_email or email_atual,
+            'message': 'Dados atualizados com sucesso',
         })
-        
+
     except Exception as e:
         print(f'Erro ao atualizar usuário: {e}')
         return jsonify({'error': f'Erro ao atualizar usuário: {str(e)}'}), 500
