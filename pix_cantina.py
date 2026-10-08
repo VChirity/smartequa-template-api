@@ -1,8 +1,8 @@
 ﻿# -*- coding: utf-8 -*-
 """
-Rotas PIX Cantina (Mercado Pago) para o app Smart Equa├º├úo.
-N├âO altera nenhuma rota de templates - apenas adiciona endpoints /api/pix/*
-Quita├º├úo de d├¡vida: confirm-debt e settle-debt-balance (Firebase Admin no servidor).
+Rotas PIX Cantina (Mercado Pago) para o app Smart Equação.
+NÃO altera nenhuma rota de templates - apenas adiciona endpoints /api/pix/*
+Quitação de dívida: confirm-debt e settle-debt-balance (Firebase Admin no servidor).
 """
 import json
 import os
@@ -534,7 +534,7 @@ def register_pix_routes(app):
 
     @app.route('/api/pix/check', methods=['GET'])
     def pix_check():
-        """Teste de conex├úo com Mercado Pago (token v├ílido)."""
+        """Teste de conexão com Mercado Pago (token válido)."""
         headers = _mp_headers()
         if not headers:
             return jsonify({'status': 'ERRO', 'detalhe': 'Token ausente'}), 503
@@ -550,17 +550,17 @@ def register_pix_routes(app):
                 'status': 'ONLINE',
                 'integracao': 'Mercado Pago',
                 'loja': data.get('site_id', ''),
-                'mensagem': 'Token v├ílido e comunicando com Mercado Pago!',
+                'mensagem': 'Token válido e comunicando com Mercado Pago!',
             })
         except Exception as e:
             return jsonify({'status': 'ERRO', 'detalhe': str(e)}), 500
 
     @app.route('/api/pix/create', methods=['POST'])
     def pix_create():
-        """Cria cobran├ºa PIX. Body: { "valor": number, "descricao": string }."""
+        """Cria cobrança PIX. Body: { "valor": number, "descricao": string }."""
         headers = _mp_headers()
         if not headers:
-            return jsonify({'error': 'Servidor n├úo configurado', 'detail': 'Token MP ausente'}), 503
+            return jsonify({'error': 'Servidor não configurado', 'detail': 'Token MP ausente'}), 503
 
         try:
             body = request.get_json() or {}
@@ -570,10 +570,10 @@ def register_pix_routes(app):
             try:
                 transaction_amount = float(valor)
             except (TypeError, ValueError):
-                return jsonify({'error': 'Valor inv├ílido'}), 400
+                return jsonify({'error': 'Valor inválido'}), 400
 
             if transaction_amount <= 0:
-                return jsonify({'error': 'Valor inv├ílido'}), 400
+                return jsonify({'error': 'Valor inválido'}), 400
 
             payload = {
                 'transaction_amount': transaction_amount,
@@ -588,7 +588,7 @@ def register_pix_routes(app):
                 creator_uid, _err = _verify_bearer_uid()
                 if creator_uid:
                     payload['external_reference'] = f'uid:{creator_uid}'
-            # Evita PIX com validade curta por padr├úo do Mercado Pago.
+            # Evita PIX com validade curta por padrão do Mercado Pago.
             payload['date_of_expiration'] = (
                 datetime.now(timezone.utc) + timedelta(days=7)
             ).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -622,9 +622,9 @@ def register_pix_routes(app):
                 err_detail = e.response.json().get('message', err_detail)
             except Exception:
                 pass
-            return jsonify({'error': 'Erro ao criar cobran├ºa', 'detail': err_detail}), 500
+            return jsonify({'error': 'Erro ao criar cobrança', 'detail': err_detail}), 500
         except Exception as e:
-            return jsonify({'error': 'Erro ao criar cobran├ºa', 'detail': str(e)}), 500
+            return jsonify({'error': 'Erro ao criar cobrança', 'detail': str(e)}), 500
 
     @app.route('/api/pix/status/<txid>', methods=['GET'])
     def pix_status(txid):
@@ -859,7 +859,7 @@ def register_pix_routes(app):
     @app.route('/api/pix/settle-debt-balance', methods=['POST'])
     def pix_settle_debt_balance():
         """
-        Quita d├¡vida usando apenas o saldo da carteira (servidor aplica d├®bito e remove bloqueio).
+        Quita dívida usando apenas o saldo da carteira (servidor aplica débito e remove bloqueio).
         Header: Authorization: Bearer <Firebase ID token do aluno>
         """
         uid, err = _verify_bearer_uid()
@@ -867,7 +867,7 @@ def register_pix_routes(app):
             return err
         fb_db = _get_fb_db()
         if fb_db is None:
-            return jsonify({'ok': False, 'error': 'Firebase Admin n├úo configurado'}), 503
+            return jsonify({'ok': False, 'error': 'Firebase Admin não configurado'}), 503
         body = request.get_json(silent=True) or {}
         target = (body.get('userId') or '').strip() or uid
         if target != uid and not _is_staff(uid):
@@ -876,7 +876,7 @@ def register_pix_routes(app):
         ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
         debt = ref_debt.get()
         if not debt or not isinstance(debt, dict):
-            return jsonify({'ok': False, 'error': 'Sem d├¡vida pendente'}), 400
+            return jsonify({'ok': False, 'error': 'Sem dívida pendente'}), 400
         total = _money(debt.get('totalAmount'))
         paid = _money(debt.get('paidAmount'))
         pending = max(0.0, total - paid)
@@ -902,7 +902,7 @@ def register_pix_routes(app):
         uref = fb_db.reference(f'usuarios/{uid}')
         snap = uref.get()
         if not isinstance(snap, dict):
-            return jsonify({'ok': False, 'error': 'Usu├írio n├úo encontrado'}), 400
+            return jsonify({'ok': False, 'error': 'Usuário não encontrado'}), 400
         balance = _money(snap.get('cantinaSaldo'))
         if balance + 1e-6 < pending:
             return jsonify({'ok': False, 'error': 'Saldo insuficiente'}), 400
