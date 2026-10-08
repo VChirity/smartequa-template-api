@@ -152,6 +152,54 @@ def _payer_name(payment):
     return f'{first} {last}'.strip()
 
 
+def _payment_amount(payment, entry=None):
+    """Valor REAL pago (Mercado Pago). O registro pendente é escrito pelo app e
+    não pode decidir quanto crédito o aluno recebe."""
+    amt = _money((payment or {}).get('transaction_amount'))
+    if amt > 0:
+        return amt
+    return _money((entry or {}).get('amount'))
+
+
+def _bound_uid(payment):
+    """UID gravado no PIX na criação (external_reference 'uid:<uid>'), se houver."""
+    ext = str((payment or {}).get('external_reference') or '').strip()
+    if ext.startswith('uid:'):
+        return ext[4:].strip() or None
+    return None
+
+
+def _credit_balance(fb_db, uid, amount):
+    """Soma [amount] em cantinaSaldo de forma atômica (não sobrescreve débitos
+    feitos ao mesmo tempo pelo app)."""
+    amount = max(0.0, _money(amount))
+    ref = fb_db.reference(f'usuarios/{uid}/cantinaSaldo')
+
+    def txn(cur):
+        return round(_money(cur) + amount, 2)
+
+    ref.transaction(txn)
+
+
+def _debit_balance_upto(fb_db, uid, wanted):
+    """Debita até [wanted] do saldo (nunca deixa negativo). Retorna o valor
+    efetivamente debitado."""
+    wanted = max(0.0, _money(wanted))
+    if wanted <= 0.001:
+        return 0.0
+    ref = fb_db.reference(f'usuarios/{uid}/cantinaSaldo')
+    out = {'debited': 0.0}
+
+    def txn(cur):
+        current = _money(cur)
+        take = min(current, wanted)
+        out['debited'] = take
+        return round(current - take, 2)
+
+    ref.transaction(txn)
+    return out['debited']
+
+
 def _load_pending_entry(fb_db, txid, uid=None):
     entry = fb_db.reference(f'cantina_pending_pix/{txid}').get()
     if isinstance(entry, dict):
@@ -374,6 +422,10 @@ def _settle_approved_pix(txid, payment=None, entry=None):
     kind = str(entry.get('type') or '').strip() or 'balance'
     if not uid:
         return False, 'no_user'
+    bound = _bound_uid(payment)
+    if bound and bound != uid and not _is_staff(bound):
+        # PIX criado por outro usuário: não pode ser usado como crédito deste.
+        return False, 'user_mismatch'
     if _purchase_has_txid(fb_db, uid, txid) and kind != 'debt':
         _cleanup_pending(fb_db, txid, uid)
         _finish_settle_lock(fb_db, txid, kind)
@@ -387,7 +439,7 @@ def _settle_approved_pix(txid, payment=None, entry=None):
     try:
         pagante = _payer_name(payment)
         created = str(entry.get('createdAt') or datetime.now(timezone.utc).isoformat())
-        amount = _money(entry.get('amount') or payment.get('transaction_amount'))
+        amount = _payment_amount(payment, entry)
         buyer = str(entry.get('buyerName') or entry.get('sourceProductName') or '').strip()
         if kind == 'debt':
             ref_debt = fb_db.reference(f'cantina_pending_debts/{uid}')
@@ -397,18 +449,10 @@ def _settle_approved_pix(txid, payment=None, entry=None):
                 _finish_settle_lock(fb_db, txid, 'debt')
                 return True, 'already'
             if debt:
-                used = _money(entry.get('debtBalanceUsed'))
-                pix_amount = _money(entry.get('amount') or payment.get('transaction_amount'))
-                if used > 0:
-                    uref = fb_db.reference(f'usuarios/{uid}')
-                    snap = uref.get()
-                    if isinstance(snap, dict):
-                        current = _money(snap.get('cantinaSaldo'))
-                        nome = (snap.get('cantinaNome') or snap.get('nome') or '').strip()
-                        uref.update({
-                            'cantinaSaldo': max(0.0, current - used),
-                            'cantinaNome': nome or None,
-                        })
+                wanted_used = _money(entry.get('debtBalanceUsed'))
+                pix_amount = _payment_amount(payment, entry)
+                # Só abate da dívida o saldo que de fato saiu da carteira.
+                used = _debit_balance_upto(fb_db, uid, wanted_used) if wanted_used > 0 else 0.0
                 _apply_debt_payment(
                     fb_db,
                     uid,
@@ -428,9 +472,13 @@ def _settle_approved_pix(txid, payment=None, entry=None):
                 uref = fb_db.reference(f'usuarios/{uid}')
                 snap = uref.get()
                 snap = snap if isinstance(snap, dict) else {}
-                current = float(snap.get('cantinaSaldo') or 0)
                 nome = (snap.get('cantinaNome') or snap.get('nome') or buyer).strip()
-                uref.update({'cantinaSaldo': current + amount, 'cantinaNome': nome or None})
+                _credit_balance(fb_db, uid, amount)
+                if nome and not snap.get('cantinaNome'):
+                    try:
+                        uref.update({'cantinaNome': nome})
+                    except Exception:
+                        pass
                 _write_purchase(fb_db, uid, pid, {
                     'dateTime': created,
                     'items': [],
@@ -534,6 +582,12 @@ def register_pix_routes(app):
                 'payer': {'email': 'cliente@cantina.com'},
                 'notification_url': _webhook_public_url(),
             }
+            # App 19.7+ manda o token: o PIX fica vinculado a quem o gerou e não
+            # pode ser "aproveitado" como crédito por outra conta.
+            if request.headers.get('Authorization', '').startswith('Bearer '):
+                creator_uid, _err = _verify_bearer_uid()
+                if creator_uid:
+                    payload['external_reference'] = f'uid:{creator_uid}'
             # Evita PIX com validade curta por padr├úo do Mercado Pago.
             payload['date_of_expiration'] = (
                 datetime.now(timezone.utc) + timedelta(days=7)
@@ -597,8 +651,11 @@ def register_pix_routes(app):
             if first or last:
                 pagante = f'{first} {last}'.strip()
             result = {'pago': status == 'approved', 'status_mp': status}
-            if pagante:
-                result['pagante'] = pagante
+            # Nome do pagante é dado pessoal: só para quem está logado no app.
+            if pagante and request.headers.get('Authorization', '').startswith('Bearer '):
+                viewer, _err = _verify_bearer_uid()
+                if viewer:
+                    result['pagante'] = pagante
             return jsonify(result)
         except Exception:
             return jsonify({'pago': False}), 500
@@ -861,3 +918,83 @@ def register_pix_routes(app):
             note='Quitação com saldo da carteira',
         )
         return jsonify({'ok': True})
+
+    @app.route('/api/pix/settle-one', methods=['POST'])
+    def pix_settle_one():
+        """App confirma UM PIX pago (recarga, carrinho ou dívida). O crédito é
+        aplicado aqui no servidor com o valor real do Mercado Pago — o app não
+        grava mais saldo. Body: { "txid": "..." }."""
+        uid, err = _verify_bearer_uid()
+        if err:
+            return err
+        fb_db = _get_fb_db()
+        if fb_db is None:
+            return jsonify({'ok': False, 'error': 'Firebase Admin nao configurado'}), 503
+        body = request.get_json(silent=True) or {}
+        txid = str(body.get('txid') or '').strip()
+        if not txid:
+            return jsonify({'ok': False, 'error': 'txid obrigatorio'}), 400
+        staff = _is_staff(uid)
+        target = str(body.get('userId') or '').strip() or uid
+        if target != uid and not staff:
+            return jsonify({'ok': False, 'error': 'Sem permissao'}), 403
+        entry = _load_pending_entry(fb_db, txid, target)
+        if isinstance(entry, dict):
+            owner = str(entry.get('userId') or '').strip()
+            if owner and owner != uid and not staff:
+                return jsonify({'ok': False, 'error': 'Usuario nao corresponde ao PIX'}), 403
+        else:
+            settled = fb_db.reference(f'cantina_pix_settled/{txid}').get()
+            if isinstance(settled, dict) and settled.get('status') == 'settled':
+                return jsonify({'ok': True, 'reason': 'already', 'kind': settled.get('type')})
+            if _purchase_has_txid(fb_db, target, txid):
+                return jsonify({'ok': True, 'reason': 'already'})
+            return jsonify({'ok': False, 'reason': 'no_pending'}), 404
+        ok, reason = _settle_approved_pix(txid, entry=entry)
+        if ok:
+            return jsonify({'ok': True, 'reason': reason})
+        code = 409 if reason in ('not_approved', 'locked') else 400
+        return jsonify({'ok': False, 'reason': reason}), code
+
+    @app.route('/api/cantina/vale-renew', methods=['POST'])
+    def cantina_vale_renew():
+        """Renovação mensal do vale alimentação (antes feita pelo app do aluno).
+        Novo vale = recorrência - consumido no mês (cantina_vale_usos)."""
+        uid, err = _verify_bearer_uid()
+        if err:
+            return err
+        fb_db = _get_fb_db()
+        if fb_db is None:
+            return jsonify({'ok': False, 'error': 'Firebase Admin nao configurado'}), 503
+        body = request.get_json(silent=True) or {}
+        target = str(body.get('userId') or '').strip() or uid
+        if target != uid and not _is_staff(uid):
+            return jsonify({'ok': False, 'error': 'Sem permissao'}), 403
+        uref = fb_db.reference(f'usuarios/{target}')
+        snap = uref.get()
+        if not isinstance(snap, dict):
+            return jsonify({'ok': False, 'error': 'Usuario nao encontrado'}), 404
+        recorrencia = _money(snap.get('cantinaValeRecorrencia'))
+        brt = timezone(timedelta(hours=-3))
+        now = datetime.now(brt)
+        month_key = f'{now.year}-{now.month:02d}'
+        if recorrencia <= 0 or str(snap.get('cantinaValeUltimoReset') or '') == month_key:
+            return jsonify({'ok': True, 'renewed': False})
+        consumed = 0.0
+        usos = fb_db.reference(f'cantina_vale_usos/{target}').get() or {}
+        if isinstance(usos, dict):
+            for uso in usos.values():
+                if not isinstance(uso, dict):
+                    continue
+                raw = str(uso.get('date') or '').strip()
+                try:
+                    d = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                except Exception:
+                    continue
+                if d.tzinfo is not None:
+                    d = d.astimezone(brt)
+                if d.year == now.year and d.month == now.month:
+                    consumed += _money(uso.get('amount'))
+        novo = max(0.0, round(recorrencia - consumed, 2))
+        uref.update({'cantinaVale': novo, 'cantinaValeUltimoReset': month_key})
+        return jsonify({'ok': True, 'renewed': True, 'vale': novo})

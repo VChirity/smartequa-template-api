@@ -96,7 +96,8 @@ def _verify_request_token(id_token):
         if not user_data:
             return None, 'Usuário não encontrado no banco de dados'
         
-        is_admin = user_data.get('isAdmin') == True or user_data.get('role') == 'admin'
+        # 'isAdmin' não vale mais: era um campo que o próprio usuário podia gravar.
+        is_admin = user_data.get('role') == 'admin'
         is_prof_admin = user_data.get('isProfAdmin') == True
         
         if not (is_admin or is_prof_admin):
