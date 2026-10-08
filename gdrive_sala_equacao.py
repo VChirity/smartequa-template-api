@@ -341,10 +341,23 @@ def _new_setup_ticket(uid):
 
 
 def _consume_setup_ticket(ticket):
-    saved = _rtdb_get(RTDB_OAUTH_SETUP) or {}
-    _rtdb_set(RTDB_OAUTH_SETUP, None)
-    return bool(ticket) and ticket == (saved.get('ticket') or '') and \
-        int(time.time()) - int(saved.get('at') or 0) <= 600
+    # Sem bilhete: 401, sem escrever nada (set(None) derruba o Firebase Admin).
+    if not ticket:
+        return False
+    try:
+        saved = _rtdb_get(RTDB_OAUTH_SETUP) or {}
+        if not isinstance(saved, dict):
+            saved = {}
+        ok = ticket == (saved.get('ticket') or '') and \
+            int(time.time()) - int(saved.get('at') or 0) <= 600
+        if ok:
+            from firebase_admin import db
+            ready, _err = _ensure_firebase()
+            if ready:
+                db.reference(RTDB_OAUTH_SETUP).delete()
+        return ok
+    except Exception:
+        return False
 
 
 def _verify_professor_or_admin():
