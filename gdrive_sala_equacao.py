@@ -34,6 +34,9 @@ DRIVE_SCOPES = [
 ]
 RTDB_OAUTH_PATH = 'sala_equacao_secrets/drive_oauth'
 RTDB_OAUTH_STATE = 'sala_equacao_secrets/drive_oauth_state'
+RTDB_OAUTH_SETUP = 'sala_equacao_secrets/drive_oauth_setup'
+# Chave Web pública do app (a mesma do Flutter); só para o login na página de configuração.
+FIREBASE_WEB_API_KEY = os.environ.get('FIREBASE_WEB_API_KEY') or 'AIzaSyBsJRL-vs4m3h62ZU3jrl_iRk8SvDNIyyk'
 
 CONNECT_PAGE = '''<!doctype html>
 <html lang="pt-BR">
@@ -82,22 +85,54 @@ CONNECT_PAGE = '''<!doctype html>
       <code>{{ redirect_uri }}</code></li>
     <li>Copie o ID e o Secret e cole abaixo.</li>
   </ol>
-  <form method="post" action="/api/sala-equacao/drive-oauth/credentials">
+  <form method="post" action="/api/sala-equacao/drive-oauth/credentials" class="se-auth">
     <label>ID do cliente</label>
     <input name="client_id" required autocomplete="off">
     <label>Segredo do cliente</label>
     <input name="client_secret" required autocomplete="off">
+    <label>Seu login de administrador no app (e-mail ou usuário)</label>
+    <input class="se-user" required autocomplete="username">
+    <label>Senha do app</label>
+    <input class="se-pass" type="password" required autocomplete="current-password">
+    <input type="hidden" name="id_token">
     <p><button type="submit">Salvar e continuar</button></p>
   </form>
   {% else %}
   <p>Credenciais do Google já estão no servidor. Agora autorize <b>o Gmail dono da pasta</b> (o dos 5 TB):</p>
-  <p><a class="btn" href="/api/sala-equacao/drive-oauth/start">Autorizar pasta do Drive</a></p>
+  <form method="post" action="/api/sala-equacao/drive-oauth/begin" class="se-auth">
+    <label>Seu login de administrador no app (e-mail ou usuário)</label>
+    <input class="se-user" required autocomplete="username">
+    <label>Senha do app</label>
+    <input class="se-pass" type="password" required autocomplete="current-password">
+    <input type="hidden" name="id_token">
+    <p><button type="submit">Autorizar pasta do Drive</button></p>
+  </form>
   {% endif %}
 {% endif %}
 <p style="margin-top:24px;color:#666;font-size:.9rem">
   Pasta: <code>{{ folder_id }}</code><br>
   Status: {{ storage }}
 </p>
+<script>
+// Login de admin feito direto no Google (Identity Toolkit); a senha não passa por este servidor.
+document.querySelectorAll('form.se-auth').forEach(function (f) {
+  f.addEventListener('submit', function (ev) {
+    if (f.dataset.ok === '1') return;
+    ev.preventDefault();
+    var u = f.querySelector('.se-user').value.trim();
+    var email = u.indexOf('@') >= 0 ? u : u + '@colegioequacao.com';
+    fetch('https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={{ api_key }}', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: email, password: f.querySelector('.se-pass').value, returnSecureToken: true})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.idToken) { alert('Login inválido.'); return; }
+      f.querySelector('input[name=id_token]').value = j.idToken;
+      f.querySelector('.se-pass').value = '';
+      f.dataset.ok = '1'; f.submit();
+    }).catch(function () { alert('Falha no login.'); });
+  });
+});
+</script>
 </body>
 </html>
 '''
@@ -270,6 +305,46 @@ def _verify_admin():
     if data.get('isProfAdmin') is True or data.get('isAdmin') is True or role in ('admin', 'profAdmin'):
         return uid, None
     return None, (jsonify({'ok': False, 'error': 'Só administrador pode limpar a lixeira'}), 403)
+
+
+def _verify_drive_config_admin():
+    """Rotas que mudam a configuração do Drive: exige ID token Firebase de admin
+    (role admin/profAdmin ou isProfAdmin). Token no header Bearer ou no campo de
+    formulário id_token (a página de configuração é HTML puro)."""
+    try:
+        header = request.headers.get('Authorization', '')
+        token = header[7:] if header.startswith('Bearer ') else (request.form.get('id_token') or '')
+        token = token.strip()
+        if not token:
+            return None, (jsonify({'ok': False, 'error': 'Token ausente'}), 401)
+        from firebase_admin import auth, db
+        ok, err = _ensure_firebase()
+        if not ok:
+            return None, (jsonify({'ok': False, 'error': err or 'Servidor sem Firebase Admin'}), 503)
+        try:
+            uid = auth.verify_id_token(token).get('uid')
+        except Exception:
+            return None, (jsonify({'ok': False, 'error': 'Token inválido'}), 401)
+        data = db.reference(f'usuarios/{uid}').get() or {}
+        role = str(data.get('role') or '')
+        if role in ('admin', 'profAdmin') or data.get('isProfAdmin') is True:
+            return uid, None
+        return None, (jsonify({'ok': False, 'error': 'Só administrador pode configurar o Drive'}), 403)
+    except Exception as e:
+        return None, (jsonify({'ok': False, 'error': str(e)[:200]}), 401)
+
+
+def _new_setup_ticket(uid):
+    ticket = secrets.token_urlsafe(24)
+    _rtdb_set(RTDB_OAUTH_SETUP, {'ticket': ticket, 'at': int(time.time()), 'uid': uid})
+    return ticket
+
+
+def _consume_setup_ticket(ticket):
+    saved = _rtdb_get(RTDB_OAUTH_SETUP) or {}
+    _rtdb_set(RTDB_OAUTH_SETUP, None)
+    return bool(ticket) and ticket == (saved.get('ticket') or '') and \
+        int(time.time()) - int(saved.get('at') or 0) <= 600
 
 
 def _verify_professor_or_admin():
@@ -706,6 +781,7 @@ def register_gdrive_sala_routes(app):
             email=email,
             has_client=bool(_client_id() and _client_secret()),
             redirect_uri=_redirect_uri(),
+            api_key=FIREBASE_WEB_API_KEY,
             folder_id=_folder_id(),
             storage='gdrive-oauth' if drive else 'precisa autorizar',
             error=request.args.get('erro') or '',
@@ -713,6 +789,9 @@ def register_gdrive_sala_routes(app):
 
     @app.route('/api/sala-equacao/drive-oauth/credentials', methods=['POST'])
     def sala_drive_save_credentials():
+        uid, aerr = _verify_drive_config_admin()
+        if aerr is not None:
+            return aerr
         client_id = (request.form.get('client_id') or '').strip()
         client_secret = (request.form.get('client_secret') or '').strip()
         if not client_id or not client_secret:
@@ -723,10 +802,20 @@ def register_gdrive_sala_routes(app):
         ok, err = _rtdb_set(RTDB_OAUTH_PATH, saved)
         if not ok:
             return redirect('/api/sala-equacao/drive-conectar?erro=' + (err or 'falha'))
-        return redirect('/api/sala-equacao/drive-oauth/start')
+        return redirect('/api/sala-equacao/drive-oauth/start?' + urlencode({'setup': _new_setup_ticket(uid)}))
+
+    @app.route('/api/sala-equacao/drive-oauth/begin', methods=['POST'])
+    def sala_drive_oauth_begin():
+        uid, aerr = _verify_drive_config_admin()
+        if aerr is not None:
+            return aerr
+        return redirect('/api/sala-equacao/drive-oauth/start?' + urlencode({'setup': _new_setup_ticket(uid)}))
 
     @app.route('/api/sala-equacao/drive-oauth/start', methods=['GET'])
     def sala_drive_oauth_start():
+        # Só com o bilhete de uso único emitido por /credentials ou /begin (admin logado).
+        if not _consume_setup_ticket(request.args.get('setup') or ''):
+            return jsonify({'ok': False, 'error': 'Não autorizado: entre como administrador na página de configuração.'}), 401
         if not (_client_id() and _client_secret()):
             return redirect('/api/sala-equacao/drive-conectar?erro=Falta+ID+e+segredo+do+cliente')
         state = secrets.token_urlsafe(24)
