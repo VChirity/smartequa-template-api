@@ -2,7 +2,7 @@ import os
 import google.generativeai as genai
 
 # Configurar API Key
-api_key = 'AIzaSyBomqSUgc3m7HCZu_dQS0nUy2cPSDT1q7I'
+api_key = 'COLOQUE_SUA_CHAVE'
 genai.configure(api_key=api_key)
 
 print("=" * 60)
