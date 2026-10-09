@@ -14,7 +14,7 @@ from collections import deque
 
 from flask import jsonify, request
 
-ENFORCE_DEFAULT = '0'
+ENFORCE_DEFAULT = '1'
 
 RATE_MAX = int(os.environ.get('ESSAY_RATE_MAX', '20'))
 RATE_WINDOW = int(os.environ.get('ESSAY_RATE_WINDOW_S', '600'))
