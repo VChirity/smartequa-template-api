@@ -27,6 +27,9 @@ register_pix_routes(app)
 from firebase_admin_routes import register_firebase_admin_routes
 register_firebase_admin_routes(app)
 
+# Assistente de Redação: login + limite (ver essay_guard.py)
+from essay_guard import essay_guard
+
 from gdrive_sala_equacao import register_gdrive_sala_routes
 register_gdrive_sala_routes(app)
 
@@ -198,6 +201,9 @@ def transcrever_redacao():
     Endpoint para transcrever redação manuscrita via OCR usando Google Gemini
     Recebe imagem em Base64 e retorna texto transcrito
     """
+    _guard = essay_guard('transcrever')
+    if _guard is not None:
+        return _guard
     try:
         dados = request.json
         
@@ -208,7 +214,6 @@ def transcrever_redacao():
         api_key = os.getenv('GEMINI_API_KEY')
         if not api_key:
             raise Exception('GEMINI_API_KEY não configurada nas variáveis de ambiente')
-        print(f'🔑 Transcrever - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
         # Decodificar imagem Base64
@@ -278,6 +283,9 @@ def corrigir_redacao():
     Endpoint para corrigir redação usando Google Gemini
     Recebe JSON com tema e texto, retorna correção estruturada
     """
+    _guard = essay_guard('corrigir')
+    if _guard is not None:
+        return _guard
     try:
         dados = request.json
         
@@ -291,7 +299,6 @@ def corrigir_redacao():
         api_key = os.getenv('GEMINI_API_KEY')
         if not api_key:
             raise Exception('GEMINI_API_KEY não configurada nas variáveis de ambiente')
-        print(f'🔑 Corrigir - Usando API Key: {api_key[:20]}...')
         genai.configure(api_key=api_key)
         
         # Montar prompt completo
