@@ -1,0 +1,11 @@
+#!/bin/sh
+# Confere todos os commits que vão subir (pega também commit feito com --no-verify).
+Z=0000000000000000000000000000000000000000
+T=$(mktemp); R=0
+while read lref lsha rref rsha; do
+  [ "$lsha" = "$Z" ] && continue
+  if [ "$rsha" = "$Z" ]; then RANGE="$lsha --not --remotes"; else RANGE="$rsha..$lsha"; fi
+  git log -p --no-color -U0 $RANGE > "$T"
+  sh "$(git rev-parse --show-toplevel)/.githooks/secret_scan.sh" "$T" || R=1
+done
+rm -f "$T"; exit $R

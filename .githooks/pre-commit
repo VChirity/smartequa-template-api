@@ -1,0 +1,3 @@
+#!/bin/sh
+T=$(mktemp); git diff --cached -U0 --no-color > "$T"
+sh "$(git rev-parse --show-toplevel)/.githooks/secret_scan.sh" "$T"; R=$?; rm -f "$T"; exit $R

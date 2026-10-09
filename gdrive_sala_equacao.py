@@ -36,7 +36,27 @@ RTDB_OAUTH_PATH = 'sala_equacao_secrets/drive_oauth'
 RTDB_OAUTH_STATE = 'sala_equacao_secrets/drive_oauth_state'
 RTDB_OAUTH_SETUP = 'sala_equacao_secrets/drive_oauth_setup'
 # Chave Web pública do app (a mesma do Flutter); só para o login na página de configuração.
-FIREBASE_WEB_API_KEY = os.environ.get('FIREBASE_WEB_API_KEY') or 'AIzaSyBsJRL-vs4m3h62ZU3jrl_iRk8SvDNIyyk'
+# Chave web PÚBLICA do Firebase (a mesma que o app usa). Não fica no código:
+# vem de FIREBASE_WEB_API_KEY (env) ou do init.json do Firebase Hosting.
+FIREBASE_INIT_JSON_URL = 'https://equa-sec-apk.web.app/__/firebase/init.json'
+_web_api_key_cache = {'v': None, 'at': 0.0}
+
+
+def _firebase_web_api_key():
+    env = (os.environ.get('FIREBASE_WEB_API_KEY') or '').strip()
+    if env:
+        return env
+    now = time.time()
+    if _web_api_key_cache['v'] and now - _web_api_key_cache['at'] < 6 * 3600:
+        return _web_api_key_cache['v']
+    try:
+        r = http_requests.get(FIREBASE_INIT_JSON_URL, timeout=8)
+        key = ((r.json() or {}).get('apiKey') or '').strip()
+        if key:
+            _web_api_key_cache.update(v=key, at=now)
+    except Exception:
+        pass
+    return _web_api_key_cache['v'] or ''
 
 CONNECT_PAGE = '''<!doctype html>
 <html lang="pt-BR">
@@ -794,7 +814,7 @@ def register_gdrive_sala_routes(app):
             email=email,
             has_client=bool(_client_id() and _client_secret()),
             redirect_uri=_redirect_uri(),
-            api_key=FIREBASE_WEB_API_KEY,
+            api_key=_firebase_web_api_key(),
             folder_id=_folder_id(),
             storage='gdrive-oauth' if drive else 'precisa autorizar',
             error=request.args.get('erro') or '',
