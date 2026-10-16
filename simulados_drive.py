@@ -34,7 +34,54 @@ def _find_file(service, name, parent_id):
     return res.get('files') or []
 
 
+def _trash_simulados_file(service, file_id):
+    """Manda para a lixeira do Drive só arquivos criados por Simulados (appProperties.simulados=1)."""
+    try:
+        meta = service.files().get(fileId=file_id, fields='id,appProperties,trashed', supportsAllDrives=True).execute()
+    except Exception as e:
+        if 'notFound' in str(e) or '404' in str(e):
+            return 'missing'
+        raise
+    if (meta.get('appProperties') or {}).get('simulados') != '1':
+        return 'forbidden'
+    if not meta.get('trashed'):
+        service.files().update(fileId=file_id, body={'trashed': True}, supportsAllDrives=True).execute()
+    return 'trashed'
+
+
 def register_simulados_drive_routes(app):
+    @app.route('/api/simulados/drive-check', methods=['GET'])
+    def simulados_drive_check():
+        # diagnóstico sem dados sensíveis: só diz se o servidor alcança a pasta-mãe e pode escrever nela
+        service, derr = G._drive_service()
+        if service is None:
+            return jsonify({'ok': False, 'stage': 'oauth', 'error': derr or 'Drive não autorizado'}), 503
+        try:
+            meta = service.files().get(fileId=_parent_id(), fields='id,trashed,capabilities(canAddChildren)',
+                                       supportsAllDrives=True).execute()
+            return jsonify({'ok': True, 'parentReachable': True, 'trashed': bool(meta.get('trashed')),
+                            'canAddChildren': bool((meta.get('capabilities') or {}).get('canAddChildren'))})
+        except Exception as e:
+            return jsonify({'ok': False, 'stage': 'parent', 'error': str(e)[:200]}), 500
+
+    @app.route('/api/simulados/correcao/<file_id>', methods=['DELETE'])
+    def simulados_correcao_delete(file_id):
+        uid, err = _admin()
+        if err is not None:
+            return err
+        if not re.fullmatch(r'[0-9A-Za-z_-]{10,100}', file_id or ''):
+            return jsonify({'ok': False, 'error': 'id inválido'}), 400
+        service, derr = G._drive_service()
+        if service is None:
+            return jsonify({'ok': False, 'error': derr or 'Drive não autorizado'}), 503
+        try:
+            st = _trash_simulados_file(service, file_id)
+            if st == 'forbidden':
+                return jsonify({'ok': False, 'error': 'Arquivo não é de Simulados'}), 403
+            return jsonify({'ok': True, 'status': st})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)[:300]}), 500
+
     @app.route('/api/simulados/correcao-upload', methods=['POST'])
     def simulados_correcao_upload():
         uid, err = _admin()
@@ -60,6 +107,7 @@ def register_simulados_drive_routes(app):
         aluno = G._safe_filename(f.get('aluno') or 'Aluno')
         aluno_id = re.sub(r'[^0-9A-Za-z_-]', '', str(f.get('alunoId') or ''))[:40]
         exam_id = re.sub(r'[^0-9A-Za-z_-]', '', str(f.get('examId') or ''))[:40]
+        replace_id = re.sub(r'[^0-9A-Za-z_-]', '', str(f.get('replaceFileId') or ''))[:100]
         service, derr = G._drive_service()
         if service is None:
             return jsonify({'ok': False, 'code': 'drive_not_connected', 'error': derr or 'Drive não autorizado',
@@ -81,6 +129,8 @@ def register_simulados_drive_routes(app):
                     name = f'{aluno} ({aluno_id}).jpg'
                 fid = service.files().create(body={'name': name, 'parents': [folder], 'appProperties': props},
                                              media_body=media, fields='id', supportsAllDrives=True).execute()['id']
+            if replace_id and replace_id != fid:
+                _trash_simulados_file(service, replace_id)
             return jsonify({'ok': True, 'fileId': fid, 'name': name,
                             'viewUrl': f'https://drive.google.com/file/d/{fid}/view',
                             'path': f'{ROOT_NAME} / {ano} / {bim}º Bimestre / {turma}'})
