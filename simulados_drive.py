@@ -135,6 +135,10 @@ def register_simulados_drive_routes(app):
                             'viewUrl': f'https://drive.google.com/file/d/{fid}/view',
                             'path': f'{ROOT_NAME} / {ano} / {bim}º Bimestre / {turma}'})
         except Exception as e:
+            if 'invalid_grant' in str(e):
+                return jsonify({'ok': False, 'code': 'drive_not_connected',
+                                'error': 'Autorização do Google Drive expirou: reautorize em ' + G._connect_url(),
+                                'connectUrl': G._connect_url()}), 503
             return jsonify({'ok': False, 'error': str(e)[:300]}), 500
 
     @app.route('/api/simulados/correcao/<file_id>', methods=['GET'])

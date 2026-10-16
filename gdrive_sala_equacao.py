@@ -807,6 +807,13 @@ def register_gdrive_sala_routes(app):
     @app.route('/api/sala-equacao/drive-conectar', methods=['GET'])
     def sala_drive_conectar():
         drive, _ = _drive_service()
+        expired = ''
+        if drive is not None:
+            try:  # testa o refresh token de verdade (token revogado/expirado = invalid_grant)
+                drive.about().get(fields='user').execute()
+            except Exception as e:
+                expired = str(e)[:120]
+                drive = None
         email = (_oauth_saved().get('email') or '') if drive else ''
         return render_template_string(
             CONNECT_PAGE,
@@ -817,7 +824,7 @@ def register_gdrive_sala_routes(app):
             api_key=_firebase_web_api_key(),
             folder_id=_folder_id(),
             storage='gdrive-oauth' if drive else 'precisa autorizar',
-            error=request.args.get('erro') or '',
+            error=request.args.get('erro') or (('A autorização do Google Drive expirou ou foi revogada (' + expired + '). Entre como administrador e autorize de novo.') if expired else ''),
         )
 
     @app.route('/api/sala-equacao/drive-oauth/credentials', methods=['POST'])
