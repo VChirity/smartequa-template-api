@@ -32,6 +32,8 @@ from essay_guard import essay_guard
 
 from gdrive_sala_equacao import register_gdrive_sala_routes
 register_gdrive_sala_routes(app)
+from simulados_drive import register_simulados_drive_routes
+register_simulados_drive_routes(app)
 
 def converter_desconto_extenso(desconto_str):
     """Converte desconto numérico para extenso com decimais corretos"""
