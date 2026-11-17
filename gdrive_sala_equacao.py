@@ -724,17 +724,27 @@ def _ensure_path(service, segments, root_id):
     return parent
 
 
-def _make_file_readable_by_link(service, file_id):
-    """Só o arquivo, nunca a pasta. Aluno não lista o Drive."""
-    try:
-        service.permissions().create(
-            fileId=file_id,
-            body={'type': 'anyone', 'role': 'reader'},
-            fields='id',
-            supportsAllDrives=True,
-        ).execute()
-    except Exception:
-        pass
+def _make_file_readable_by_link(service, file_id, tentativas=3):
+    """Só o arquivo, nunca a pasta. Aluno não lista o Drive.
+
+    Tenta até `tentativas` vezes (pausa curta entre elas). Devolve
+    (True, '') quando a leitura por link ficou ativa, ou (False, erro).
+    """
+    ultimo = ''
+    for i in range(max(1, int(tentativas))):
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={'type': 'anyone', 'role': 'reader'},
+                fields='id',
+                supportsAllDrives=True,
+            ).execute()
+            return True, ''
+        except Exception as e:
+            ultimo = str(e)[:300]
+            if i + 1 < tentativas:
+                time.sleep(0.8 * (i + 1))
+    return False, ultimo
 
 
 def _file_url(file_id):
@@ -788,8 +798,8 @@ def _upload_drive_oauth(data, filename, mime, segments):
         supportsAllDrives=True,
     ).execute()
     file_id = created['id']
-    _make_file_readable_by_link(service, file_id)
-    return {
+    shared, share_err = _make_file_readable_by_link(service, file_id)
+    payload = {
         'fileId': file_id,
         'fileName': created.get('name') or filename,
         'mimeType': created.get('mimeType') or mime,
@@ -798,7 +808,11 @@ def _upload_drive_oauth(data, filename, mime, segments):
         'downloadUrl': f'https://drive.google.com/uc?export=download&id={file_id}',
         'path': ' / '.join(segments),
         'storage': 'gdrive',
-    }, None
+        'shared': bool(shared),
+    }
+    if not shared:
+        payload['shareError'] = share_err or 'falha ao liberar leitura por link'
+    return payload, None
 
 
 def register_gdrive_sala_routes(app):
